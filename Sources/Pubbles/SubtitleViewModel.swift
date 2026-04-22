@@ -88,10 +88,7 @@ class SubtitleViewModel: ObservableObject {
     }
 
     func activate() {
-        text = ""
-        animatedChars = []
-        nextCharID = 0
-        textCursorIndex = 0
+        clearTextState()
         previousLine = ""
         previousLineChars = []
         showPreviousLine = false
@@ -103,10 +100,7 @@ class SubtitleViewModel: ObservableObject {
 
     func showPubbleForDrawing() {
         guard drawingToggleActive else { return }
-        text = ""
-        animatedChars = []
-        nextCharID = 0
-        textCursorIndex = 0
+        clearTextState()
         previousLine = ""
         previousLineChars = []
         showPreviousLine = false
@@ -121,10 +115,7 @@ class SubtitleViewModel: ObservableObject {
         let fadeOut = config.config.behavior.fadeOutDuration
         DispatchQueue.main.asyncAfter(deadline: .now() + fadeOut) { [weak self] in
             guard let self, self.drawingToggleActive else { return }
-            self.text = ""
-            self.animatedChars = []
-            self.nextCharID = 0
-            self.textCursorIndex = 0
+            self.clearTextState()
             self.previousLine = ""
             self.previousLineChars = []
             self.showPreviousLine = false
@@ -138,10 +129,7 @@ class SubtitleViewModel: ObservableObject {
         if drawingToggleActive {
             if !isActive {
                 // Activate the overlay infrastructure without showing the pill
-                text = ""
-                animatedChars = []
-                nextCharID = 0
-                textCursorIndex = 0
+                clearTextState()
                 previousLine = ""
                 previousLineChars = []
                 showPreviousLine = false
@@ -284,10 +272,7 @@ class SubtitleViewModel: ObservableObject {
         let fadeOut = config.config.behavior.fadeOutDuration
         DispatchQueue.main.asyncAfter(deadline: .now() + fadeOut) { [weak self] in
             guard let self, !self.isActive else { return }
-            self.text = ""
-            self.animatedChars = []
-            self.nextCharID = 0
-            self.textCursorIndex = 0
+            self.clearTextState()
             self.previousLine = ""
             self.previousLineChars = []
             self.showPreviousLine = false
@@ -455,23 +440,15 @@ class SubtitleViewModel: ObservableObject {
         guard config.config.behavior.multiLine else {
             textCursorIndex = 0; resetIdleTimer(); return
         }
-        let currentIdx = text.index(text.startIndex, offsetBy: textCursorIndex)
-        var lineStart = text.startIndex
-        var s = currentIdx
-        while s > text.startIndex {
-            let prev = text.index(before: s)
-            if text[prev] == "\n" { lineStart = s; break }
-            s = prev
-        }
+        let (lineStart, column) = lineStartAndColumn()
         if lineStart == text.startIndex { textCursorIndex = 0; resetIdleTimer(); return }
-        let column = text.distance(from: lineStart, to: currentIdx)
         let prevNewline = text.index(before: lineStart)
         var prevLineStart = text.startIndex
-        var s2 = prevNewline
-        while s2 > text.startIndex {
-            let prev = text.index(before: s2)
-            if text[prev] == "\n" { prevLineStart = s2; break }
-            s2 = prev
+        var s = prevNewline
+        while s > text.startIndex {
+            let prev = text.index(before: s)
+            if text[prev] == "\n" { prevLineStart = s; break }
+            s = prev
         }
         let prevLineLength = text.distance(from: prevLineStart, to: prevNewline)
         textCursorIndex = text.distance(from: text.startIndex, to: text.index(prevLineStart, offsetBy: min(column, prevLineLength)))
@@ -483,15 +460,8 @@ class SubtitleViewModel: ObservableObject {
         guard config.config.behavior.multiLine else {
             textCursorIndex = text.count; resetIdleTimer(); return
         }
+        let (_, column) = lineStartAndColumn()
         let currentIdx = text.index(text.startIndex, offsetBy: textCursorIndex)
-        var lineStart = text.startIndex
-        var s = currentIdx
-        while s > text.startIndex {
-            let prev = text.index(before: s)
-            if text[prev] == "\n" { lineStart = s; break }
-            s = prev
-        }
-        let column = text.distance(from: lineStart, to: currentIdx)
         var lineEnd = currentIdx
         while lineEnd < text.endIndex && text[lineEnd] != "\n" { lineEnd = text.index(after: lineEnd) }
         if lineEnd >= text.endIndex { textCursorIndex = text.count; resetIdleTimer(); return }
@@ -505,12 +475,28 @@ class SubtitleViewModel: ObservableObject {
 
     func handleClearAll() {
         guard isActive else { return }
+        clearTextState()
+        syncDictationBaselineIfNeeded()
+        resetIdleTimer()
+    }
+
+    private func clearTextState() {
         text = ""
         animatedChars = []
         nextCharID = 0
         textCursorIndex = 0
-        syncDictationBaselineIfNeeded()
-        resetIdleTimer()
+    }
+
+    private func lineStartAndColumn() -> (lineStart: String.Index, column: Int) {
+        let currentIdx = text.index(text.startIndex, offsetBy: textCursorIndex)
+        var lineStart = text.startIndex
+        var s = currentIdx
+        while s > text.startIndex {
+            let prev = text.index(before: s)
+            if text[prev] == "\n" { lineStart = s; break }
+            s = prev
+        }
+        return (lineStart, text.distance(from: lineStart, to: currentIdx))
     }
 
     /// When the user edits text via keyboard during dictation, sync the baseline
