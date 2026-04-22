@@ -44,6 +44,7 @@ class SubtitleViewModel: ObservableObject {
     @Published var pinnedPills: [PinnedPill] = []
 
     @Published var dictationModeEnabled: Bool = false
+    private var activatedFromDictationToggle: Bool = false
     private var dictationBaseline: String = ""
     /// Number of characters already consumed from the current recognition session (for mid-session auto-advance)
     private var dictationSessionOffset: Int = 0
@@ -170,13 +171,24 @@ class SubtitleViewModel: ObservableObject {
             showTemporaryPill(text: "Enable \(SpeechManager.deniedPermissionLabel()) Permission", timeout: 4)
             return
         }
-        dictationModeEnabled.toggle()
         if dictationModeEnabled {
-            if !isActive { activate() }
-            dictationBaseline = ""
-            dictationSessionOffset = 0
-            lastDictationFullTextLength = 0
+            let shouldDismiss = activatedFromDictationToggle
+            activatedFromDictationToggle = false
+            if shouldDismiss {
+                dismiss()
+                return
+            }
+            dictationModeEnabled = false
+        } else {
+            dictationModeEnabled = true
+            if !isActive {
+                activate()
+                activatedFromDictationToggle = true
+            }
         }
+        dictationBaseline = ""
+        dictationSessionOffset = 0
+        lastDictationFullTextLength = 0
     }
 
     func pinCurrentPill() {
@@ -271,6 +283,7 @@ class SubtitleViewModel: ObservableObject {
         drawingToggleActive = false
         activatedFromDrawingToggle = false
         if pillHiddenForDrawing { pillHiddenForDrawing = false }
+        activatedFromDictationToggle = false
         // Stop dictation immediately so the audio engine doesn't run during fade
         dictationModeEnabled = false
         dictationBaseline = ""
