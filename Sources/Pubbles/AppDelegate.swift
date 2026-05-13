@@ -8,6 +8,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var overlayController: OverlayController!
     private var eventManager: EventManager!
     private var cursorTracker: CursorTracker!
+    private var wiggleDetector: WiggleDetector!
+    private var wiggleConfigCancellable: AnyCancellable?
     private var settingsWindowController: SettingsWindowController!
     private var speechManager: SpeechManager!
     private var dictationCancellable: AnyCancellable?
@@ -16,6 +18,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         overlayController = OverlayController(viewModel: viewModel)
         eventManager = EventManager(viewModel: viewModel)
         cursorTracker = CursorTracker(viewModel: viewModel)
+
+        wiggleDetector = WiggleDetector(viewModel: viewModel)
+        wiggleDetector.onWiggle = { [weak self] in
+            self?.handleWiggle()
+        }
+
+        // Drives initial value AND live updates — @Published emits current value on subscribe
+        wiggleConfigCancellable = ConfigManager.shared.$config
+            .map { $0.behavior.wiggleSensitivity }
+            .removeDuplicates()
+            .sink { [weak self] raw in
+                self?.wiggleDetector.sensitivity = WiggleDetector.Sensitivity(rawValue: raw) ?? .medium
+            }
 
         speechManager = SpeechManager()
 
@@ -60,6 +75,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         eventManager.start()
         cursorTracker.start()
+        wiggleDetector.start()
 
         if !UserDefaults.standard.bool(forKey: "hasLaunchedBefore") {
             UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
@@ -176,6 +192,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         settingsWindowController.showWindow()
         return true
+    }
+
+    private func handleWiggle() {
+        let behavior = ConfigManager.shared.config.behavior
+        guard behavior.wiggleEnabled else { return }
+        switch behavior.wiggleToActivate {
+        case "pubble":
+            viewModel.drawingModeEnabled = false
+            if !viewModel.isActive { viewModel.activate() }
+        case "babble":
+            viewModel.drawingModeEnabled = false
+            if !viewModel.dictationModeEnabled { viewModel.toggleDictation() }
+        case "doodle":
+            if !viewModel.drawingToggleActive { viewModel.toggleDrawing() }
+        default:
+            break
+        }
     }
 
     @objc private func quitApp() {

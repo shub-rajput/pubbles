@@ -48,6 +48,24 @@ struct GeneralSettingsView: View {
             }
 
             Section {
+                Toggle("Wiggle to Activate", isOn: wiggleEnabledBinding)
+
+                if behavior.wiggleEnabled {
+                    Picker("Mode", selection: wiggleModeBinding) {
+                        Text("Pubble").tag("pubble")
+                        Text("Babble").tag("babble")
+                        Text("Doodle").tag("doodle")
+                    }
+
+                    Picker("Sensitivity", selection: wiggleSensitivityBinding) {
+                        Text("Low").tag("low")
+                        Text("Medium").tag("medium")
+                        Text("High").tag("high")
+                    }
+                }
+            }
+
+            Section {
                 Button("Reset Default Themes") {
                     showResetConfirmation = true
                 }
@@ -109,6 +127,27 @@ struct GeneralSettingsView: View {
         Binding(
             get: { behavior.clickToDismiss },
             set: { configManager.setBehaviorValue("clickToDismiss", $0) }
+        )
+    }
+
+    private var wiggleEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { behavior.wiggleEnabled },
+            set: { configManager.setBehaviorValue("wiggleEnabled", $0) }
+        )
+    }
+
+    private var wiggleModeBinding: Binding<String> {
+        Binding(
+            get: { behavior.wiggleToActivate },
+            set: { configManager.setBehaviorValue("wiggleToActivate", $0) }
+        )
+    }
+
+    private var wiggleSensitivityBinding: Binding<String> {
+        Binding(
+            get: { behavior.wiggleSensitivity },
+            set: { configManager.setBehaviorValue("wiggleSensitivity", $0) }
         )
     }
 

@@ -47,6 +47,9 @@ struct BehaviorConfig: Codable, Sendable {
     var charLimit: Int = 30
     var multiLine: Bool = false
     var clickToDismiss: Bool = false
+    var wiggleEnabled: Bool = false
+    var wiggleToActivate: String = "pubble"   // "pubble" | "babble" | "doodle"
+    var wiggleSensitivity: String = "medium"  // "low" | "medium" | "high"
 }
 
 struct AppConfig: Codable, Sendable {
