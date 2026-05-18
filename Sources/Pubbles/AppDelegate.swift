@@ -114,13 +114,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        let hotkeysItem = NSMenuItem(title: "Hotkeys", action: #selector(openHotkeys), keyEquivalent: "")
-        hotkeysItem.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: nil)
-        menu.addItem(hotkeysItem)
-
         let configureItem = NSMenuItem(title: "Configure", action: #selector(openSettings), keyEquivalent: "")
         configureItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         menu.addItem(configureItem)
+        
+        let hotkeysItem = NSMenuItem(title: "Hotkeys", action: #selector(openHotkeys), keyEquivalent: "")
+        hotkeysItem.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: nil)
+        menu.addItem(hotkeysItem)
 
         let aboutItem = NSMenuItem(title: "About", action: #selector(openAbout), keyEquivalent: "")
         aboutItem.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)

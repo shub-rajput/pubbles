@@ -40,15 +40,15 @@ final class WiggleDetector {
 
         var minTravel: CGFloat {
             switch self {
-            case .low: return 420
-            case .medium: return 300
-            case .high: return 200
+            case .low: return 450
+            case .medium: return 350
+            case .high: return 250
             }
         }
 
         var windowDuration: TimeInterval {
             switch self {
-            case .low: return 0.40
+            case .low: return 0.35
             case .medium: return 0.45
             case .high: return 0.50
             }
