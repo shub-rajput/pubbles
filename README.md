@@ -75,6 +75,15 @@ Press **Cmd+M** (editable) to toggle babble mode — real-time speech-to-text th
 - Are cleared all at once with **Escape** 
 
 
+### Wiggle to Activate
+
+Shake your cursor rapidly back and forth to summon a pubble — no hotkey needed. Off by default; enable from the menubar icon or Settings.
+
+- Choose what wiggling triggers: **Pubble**, **Babble** (dictation), or **Doodle** mode
+- Sensitivity presets: **Low**, **Medium**, **High** — pick how vigorous a shake has to be
+- Suppressed while a pubble is already visible, so it won't fire mid-use
+- Configurable via `behavior.wiggleEnabled`, `behavior.wiggleToActivate`, and `behavior.wiggleSensitivity` in config
+
 ### Doodle Mode
 
 Press **Cmd+D** (editable) to toggle doodle mode — no need for the pill to be active first. When enabled:
@@ -109,6 +118,9 @@ While the pill is active:
 | **Hold Cmd + click+drag** | Draw on screen (in doodle mode) |
 | **Escape** | Dismiss pill |
 | **Enter** | New line |
+| **Up / Down** | Move cursor between lines (multi-line mode) |
+| **Cmd+Delete** | Clear all text in the active pubble |
+| **Shake cursor** | Activate pubble / babble / doodle (when wiggle mode is on) |
 
 ## Updating
 
@@ -250,6 +262,9 @@ To override a theme's style, add specific keys under `style` or `behavior`:
 - `fadeInDuration` — fade in duration in seconds (default: `0.2`)
 - `charLimit` — max characters per line, ignored when `multiLine` is on (default: `30`)
 - `multiLine` — wrap text across multiple lines instead of a single scrolling line (default: `false`)
+- `wiggleEnabled` — activate by shaking the cursor (default: `false`)
+- `wiggleToActivate` — what a wiggle triggers: `pubble`, `babble`, or `doodle` (default: `pubble`)
+- `wiggleSensitivity` — wiggle threshold: `low`, `medium`, `high` (default: `medium`)
 
 Changes apply instantly — no restart needed.
 
