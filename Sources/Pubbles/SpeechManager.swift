@@ -22,6 +22,8 @@ class SpeechManager: @unchecked Sendable {
     /// Called on the main thread with (fullTranscriptionSoFar, isFinal).
     var onResult: ((String, Bool) -> Void)?
     var onError: ((Error) -> Void)?
+    /// Called on the main thread with a normalized input level in 0...1 for UI metering.
+    var onLevel: ((Float) -> Void)?
 
     func startListening() {
         guard !isListening else { return }
@@ -32,6 +34,23 @@ class SpeechManager: @unchecked Sendable {
     func stopListening() {
         isListening = false
         tearDownSession()
+        DispatchQueue.main.async { [weak self] in self?.onLevel?(0) }
+    }
+
+    /// Computes an RMS-based input level from a mic buffer, mapped to roughly 0...1.
+    /// Runs on AVFAudio's realtime thread — keep it allocation-free and cheap.
+    private static func normalizedLevel(of buffer: AVAudioPCMBuffer) -> Float? {
+        guard let channel = buffer.floatChannelData?[0] else { return nil }
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return nil }
+        var sum: Float = 0
+        for i in 0..<frames {
+            let sample = channel[i]
+            sum += sample * sample
+        }
+        let rms = (sum / Float(frames)).squareRoot()
+        // Speech RMS sits around 0.02–0.2; scale up and clamp so normal talking fills the range.
+        return min(1, rms * 8)
     }
 
     private func startSession() {
@@ -76,8 +95,10 @@ class SpeechManager: @unchecked Sendable {
         // This closure is called on AVFAudio's realtime thread.
         // Because SpeechManager is non-isolated, Swift 6 does NOT wrap this in
         // a @MainActor thunk — so it runs safely on the audio thread.
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             request.append(buffer)
+            guard let self, let level = SpeechManager.normalizedLevel(of: buffer) else { return }
+            DispatchQueue.main.async { self.onLevel?(level) }
         }
 
         engine.prepare()

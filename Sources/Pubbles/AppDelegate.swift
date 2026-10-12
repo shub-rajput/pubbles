@@ -40,6 +40,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         speechManager.onError = { error in
             print("SpeechManager error: \(error)")
         }
+        speechManager.onLevel = { [weak self] level in
+            self?.viewModel.audioLevel = level
+        }
 
         dictationCancellable = viewModel.$dictationModeEnabled
             .dropFirst()

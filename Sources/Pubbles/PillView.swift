@@ -23,6 +23,15 @@ struct PillView: View {
 
     private var scaledFontSize: CGFloat { style.fontSize * scale }
 
+    // Recording badge sizing. Kept small and tucked into the top-leading corner so it
+    // stays out of the way of the text. Its footprint is reserved in the text wrap width
+    // (see micReservedWidth) so text never overflows the pill.
+    private var micSize: CGFloat { scaledFontSize * 0.6 }
+    private var micLeadingPad: CGFloat { style.paddingH * scale * 0.6 }
+    private var micReservedWidth: CGFloat {
+        viewModel.recordingBadgeVisible ? micSize + micLeadingPad : 0
+    }
+
     private var cursorFont: Font {
         if style.fontFamily == "system" {
             return .system(size: scaledFontSize, weight: cursorWeight)
@@ -73,7 +82,20 @@ struct PillView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        HStack(alignment: .top, spacing: 0) {
+            // Recording badge — live pill only. Pinned bubbles use PinnedPillView, so they
+            // never show this. Pulses via opacity (not scale) so it doesn't reflow text, and
+            // top-aligned so it stays tucked in the corner on multi-line bubbles.
+            if viewModel.recordingBadgeVisible {
+                Image(systemName: "mic.fill")
+                    .font(.system(size: micSize))
+                    .foregroundStyle(style.txtColor)
+                    .opacity(0.25 + Double(viewModel.audioLevel) * 0.75)
+                    .animation(.easeOut(duration: 0.1), value: viewModel.audioLevel)
+                    .padding(.leading, micLeadingPad)
+                    .padding(.top, style.paddingV * scale)
+            }
+            VStack(alignment: .leading, spacing: 0) {
             // Previous line
             if viewModel.showPreviousLine {
                 HStack(spacing: 0) {
@@ -98,7 +120,7 @@ struct PillView: View {
             // Current line (or placeholder)
             Group {
                 if configManager.config.behavior.multiLine {
-                    CharFlowLayout(contentMaxWidth: (style.maxWidth - 2 * style.paddingH) * scale) {
+                    CharFlowLayout(contentMaxWidth: (style.maxWidth - 2 * style.paddingH) * scale - micReservedWidth) {
                         currentLineContent
                     }
                 } else {
@@ -121,6 +143,7 @@ struct PillView: View {
                             .position(x: pt.x, y: pt.y)
                     }
                 }
+            }
             }
         }
         .frame(maxWidth: style.maxWidth * scale, alignment: .leading)

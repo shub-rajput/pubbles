@@ -44,6 +44,11 @@ class SubtitleViewModel: ObservableObject {
     @Published var pinnedPills: [PinnedPill] = []
 
     @Published var dictationModeEnabled: Bool = false
+    /// Live mic input level (0...1) driving the recording badge pulse. Reset to 0 when not listening.
+    @Published var audioLevel: Float = 0
+    /// Controls the recording mic badge. Unlike `isListening` this stays true through the
+    /// dismiss fade (cleared only after fadeOut) so the pill's text doesn't reflow mid-fade.
+    @Published var recordingBadgeVisible: Bool = false
     private var dictationBaseline: String = ""
     /// Number of characters already consumed from the current recognition session (for mid-session auto-advance)
     private var dictationSessionOffset: Int = 0
@@ -162,6 +167,7 @@ class SubtitleViewModel: ObservableObject {
             dismiss()
         } else {
             dictationModeEnabled = true
+            recordingBadgeVisible = true
             if !isActive { activate() }
             dictationBaseline = ""
             dictationSessionOffset = 0
@@ -272,6 +278,7 @@ class SubtitleViewModel: ObservableObject {
         let fadeOut = config.config.behavior.fadeOutDuration
         DispatchQueue.main.asyncAfter(deadline: .now() + fadeOut) { [weak self] in
             guard let self, !self.isActive else { return }
+            self.recordingBadgeVisible = false
             self.clearTextState()
             self.previousLine = ""
             self.previousLineChars = []
