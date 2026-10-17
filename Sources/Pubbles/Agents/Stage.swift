@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 
 /// The stage: Pubbles' own Chrome window (separate profile, app mode, DevTools port), sized so the
 /// page viewport is exactly the script's viewport and centered on the main display. Agents look at
@@ -37,21 +38,52 @@ final class Stage {
     /// and it works even while the window is covered.
     func open(url: String, viewport: CGSize, forTake: Bool = false) async throws {
         self.viewport = viewport
+        // A take always gets a freshly launched stage: a newly opened app comes to the front by
+        // itself, which a background app like Pubbles can't otherwise guarantee.
+        if forTake { await close() }
         if await DevTools.getJSON(endpoint("/json/version")) == nil {
+            try launchChrome(url: url)
+        } else if !(await hasPage()) {
+            // Chrome on macOS keeps running after its last window closes; start it over.
+            await close()
             try launchChrome(url: url)
         }
         try await attach()
         if forTake {
             try await requirePage().call("Emulation.clearDeviceMetricsOverride")
-            activate()
-            try await Task.sleep(for: .milliseconds(300))
-            try await fitWindow()
+            try await prepareWindow()
         } else {
             try await requirePage().call("Emulation.setDeviceMetricsOverride", [
                 "width": Int(viewport.width), "height": Int(viewport.height), "deviceScaleFactor": 0, "mobile": false,
             ])
         }
         try await load(url)
+    }
+
+    private func hasPage() async -> Bool {
+        let list = await DevTools.getJSON(endpoint("/json/list")) as? [[String: Any]] ?? []
+        return list.contains { ($0["type"] as? String) == "page" }
+    }
+
+    /// Quietly close the stage window, if it's open (cleanly, so Chrome doesn't offer to restore it).
+    func close() async {
+        guard await DevTools.getJSON(endpoint("/json/version")) != nil else { return }
+        if browser == nil { try? await attach() }
+        let pid = chromePID
+        _ = try? await browser?.call("Browser.close", timeout: 3)
+        page?.close()
+        browser?.close()
+        page = nil
+        browser = nil
+        let deadline = Date().addingTimeInterval(4)
+        while await DevTools.getJSON(endpoint("/json/version"), timeout: 0.5) != nil, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        if pid != 0, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated {
+            app.terminate()
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        chromePID = 0
     }
 
     private func launchChrome(url: String) throws {
@@ -123,7 +155,7 @@ final class Stage {
             if Date() > deadline { throw TakeError.devTools("the page didn't finish loading") }
             try await Task.sleep(for: .milliseconds(200))
         }
-        try await page.eval("window.scrollTo(0, 0); true")
+        try await page.eval("window.scrollTo({ top: 0, behavior: 'instant' }); true")
         try await Task.sleep(for: .milliseconds(800)) // entry animations
     }
 
@@ -170,8 +202,101 @@ final class Stage {
         return (CGPoint(x: n[0], y: n[1]), CGSize(width: n[2], height: n[3]), CGSize(width: n[4], height: n[5]))
     }
 
-    func activate() {
-        NSRunningApplication(processIdentifier: chromePID)?.activate()
+    // MARK: Window: bring forward, position, verify
+
+    /// What the stage window looks like on screen right now.
+    struct WindowState: Sendable {
+        var onScreen = false     // on the current Space, not minimised or hidden
+        var frontmost = false    // no normal window above it
+        var covered = 0.0        // fraction of it covered by other windows
+        var frame: CGRect?
+        var display: String?
+
+        var visible: Bool { onScreen && covered < 0.02 }
+
+        var report: [String: Any] {
+            var r: [String: Any] = ["visible": visible, "frontmost": frontmost, "onScreen": onScreen,
+                                    "coveredPercent": Int((covered * 100).rounded())]
+            if let f = frame { r["frame"] = [Int(f.minX), Int(f.minY), Int(f.width), Int(f.height)] }
+            if let display { r["display"] = display }
+            return r
+        }
+    }
+
+    /// Before a take: bring the stage forward (restoring it if minimised), fit and centre it, then
+    /// check it really is visible. Throws a `.stage` error instead of playing into a hidden window.
+    func prepareWindow() async throws {
+        let visibleFrame = NSScreen.main?.visibleFrame.size ?? .zero
+        if viewport.width > visibleFrame.width || viewport.height + 28 > visibleFrame.height {
+            throw TakeError.stage(code: "viewport_too_large", message:
+                "The script's \(Int(viewport.width))×\(Int(viewport.height)) viewport doesn't fit this display (about \(Int(visibleFrame.width))×\(Int(visibleFrame.height - 28)) available)")
+        }
+        bringToFront()
+        try await Task.sleep(for: .milliseconds(300))
+        try await fitWindow()
+        for attempt in 0..<4 {
+            bringToFront()
+            try await Task.sleep(for: .milliseconds(250 + attempt * 150))
+            if windowState().visible { return }
+        }
+        let state = windowState()
+        if !state.onScreen {
+            throw TakeError.stage(code: "stage_not_visible", message:
+                "The stage window isn't on screen (minimised, on another Space, or the screen is locked), so the take didn't start")
+        }
+        throw TakeError.stage(code: "stage_occluded", message:
+            "Another window covers \(Int((state.covered * 100).rounded()))% of the stage, so the take didn't start")
+    }
+
+    /// Raise the stage over other apps. macOS ignores plain activation requests from a background
+    /// app, so this also goes through Accessibility (which Pubbles already has).
+    func bringToFront() {
+        guard chromePID != 0, let app = NSRunningApplication(processIdentifier: chromePID) else { return }
+        NSApp.yieldActivation(to: app)
+        app.activate(options: [.activateAllWindows])
+        let ax = AXUIElementCreateApplication(chromePID)
+        AXUIElementSetAttributeValue(ax, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        var value: CFTypeRef?
+        if AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute as CFString, &value) == .success,
+           let windows = value as? [AXUIElement] {
+            for window in windows {
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            }
+        }
+    }
+
+    /// From the window server's list of on-screen windows, front to back.
+    func windowState() -> WindowState {
+        var state = WindowState()
+        guard chromePID != 0,
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            return state
+        }
+        func bounds(_ w: [String: Any]) -> CGRect? {
+            (w[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) }
+        }
+        func isNormal(_ w: [String: Any]) -> Bool {
+            (w[kCGWindowLayer as String] as? Int) == 0 && ((w[kCGWindowAlpha as String] as? Double) ?? 1) > 0.05
+        }
+        guard let index = list.firstIndex(where: {
+            ($0[kCGWindowOwnerPID as String] as? pid_t) == chromePID && isNormal($0) && (bounds($0)?.width ?? 0) > 200
+        }), let frame = bounds(list[index]) else { return state }
+
+        state.onScreen = true
+        state.frame = frame
+        // Normal windows in front of it. Pubbles' overlay sits on a higher layer, so it's not counted;
+        // Pubbles' Settings window is, if it's over the stage.
+        let above = list[..<index].filter(isNormal)
+        state.frontmost = above.isEmpty
+        let coveredArea = above.compactMap { bounds($0)?.intersection(frame) }.filter { !$0.isNull }
+            .reduce(0.0) { $0 + Double($1.width * $1.height) }
+        state.covered = min(1, coveredArea / Double(max(1, frame.width * frame.height)))
+        state.display = NSScreen.screens.first { screen in
+            let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+            return id.map { CGDisplayBounds($0).contains(CGPoint(x: frame.midX, y: frame.midY)) } ?? false
+        }?.localizedName
+        return state
     }
 
     private func requirePage() throws -> DevTools {
@@ -182,15 +307,17 @@ final class Stage {
     // MARK: Targets
 
     /// `#id` / any CSS selector, or `text:Some words` for the innermost visible element containing them.
+    /// Text matching ignores case and whitespace, so headings split by <br> or inline icons still match.
     private static let findJS = """
     (t) => {
       let el = null;
+      const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, '');
       if (t.startsWith('text:')) {
-        const q = t.slice(5).trim().toLowerCase();
+        const q = norm(t.slice(5));
         const visible = (e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
           return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
         const hits = [...document.querySelectorAll('body *')]
-          .filter((e) => (e.textContent || '').toLowerCase().includes(q) && visible(e));
+          .filter((e) => norm(e.textContent).includes(q) && visible(e));
         const set = new Set(hits);
         el = hits.find((e) => ![...e.children].some((c) => set.has(c))) || null;
       } else {
@@ -240,7 +367,8 @@ final class Stage {
 
     /// Instant scroll, for looking around (takes scroll with the wheel).
     func jumpScroll(to y: Double) async throws {
-        try await requirePage().eval("window.scrollTo(0, \(y)); true")
+        // 'instant' overrides CSS scroll-behavior: smooth, so the position is final when we read it.
+        try await requirePage().eval("window.scrollTo({ top: \(y), behavior: 'instant' }); true")
         try await Task.sleep(for: .milliseconds(150))
     }
 
@@ -280,8 +408,13 @@ final class Stage {
         let result = try await requirePage().call("Page.captureScreenshot", ["format": "png"])
         guard let b64 = result["data"] as? String, let png = Data(base64Encoded: b64),
               let image = NSImage(data: png) else { throw TakeError.devTools("screenshot failed") }
-        let scale = width / max(1, viewport.width)
-        let size = NSSize(width: (viewport.width * scale).rounded(), height: (viewport.height * scale).rounded())
+        return try Self.jpeg(image, width: width)
+    }
+
+    /// Downscale to `width` px and encode as JPEG (small enough for an agent's context).
+    static func jpeg(_ image: NSImage, width: CGFloat) throws -> Data {
+        let scale = width / max(1, image.size.width)
+        let size = NSSize(width: (image.size.width * scale).rounded(), height: (image.size.height * scale).rounded())
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
                                          bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                          colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {

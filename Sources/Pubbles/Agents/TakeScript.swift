@@ -33,10 +33,12 @@ struct TakeScript: Codable, Sendable {
         var pad: Double?
         var duration: Double?
         var seconds: Double?
+        /// Skip this step if its target isn't on the page (cookie banners that may not show).
+        var optional: Bool?
 
         enum CodingKeys: String, CodingKey {
             case action = "do"
-            case target, anchor, offset, text, key, by, align, from, pad, duration, seconds
+            case target, anchor, offset, text, key, by, align, from, pad, duration, seconds, optional
         }
     }
 

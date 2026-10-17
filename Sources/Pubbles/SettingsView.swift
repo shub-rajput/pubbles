@@ -40,6 +40,7 @@ class PermissionMonitor: ObservableObject {
         check: SpeechManager.currentPermissionsGranted,
         denied: SpeechManager.permissionsPreviouslyDenied
     )
+    static let screenRecording = PermissionMonitor(check: CGPreflightScreenCaptureAccess)
 
     @Published private(set) var isGranted: Bool
     @Published private(set) var isDenied: Bool
@@ -106,6 +107,31 @@ struct MicrophoneBannerSection: View {
             } else {
                 Button("Grant Access") {
                     Task { await SpeechManager.requestPermissions() }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+}
+
+/// Only needed to record scripted takes, so it's only asked for while agent access is on.
+struct ScreenRecordingBannerSection: View {
+    @ObservedObject private var monitor = PermissionMonitor.screenRecording
+    @ObservedObject private var configManager = ConfigManager.shared
+
+    var body: some View {
+        if configManager.config.agents.enabled {
+            PermissionBannerSection(
+                title: "Enable Screen Recording",
+                description: "Needed to record videos of scripts. Pubbles records only its stage window and its own bubbles.",
+                isGranted: monitor.isGranted
+            ) {
+                Button("Grant Access") {
+                    if !CGRequestScreenCaptureAccess() {
+                        NSWorkspace.shared.open(
+                            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+                        )
+                    }
                 }
                 .buttonStyle(.borderedProminent)
             }

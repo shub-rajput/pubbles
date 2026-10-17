@@ -5,6 +5,8 @@ enum TakeError: LocalizedError {
     case target(String)
     case script(String)
     case setup(String)
+    /// The stage couldn't be made visible, or stopped being usable mid-take. `code` is for agents.
+    case stage(code: String, message: String)
 
     var errorDescription: String? {
         switch self {
@@ -12,7 +14,13 @@ enum TakeError: LocalizedError {
         case .target(let t): return "Not on the page: \(t)"
         case .script(let m): return m
         case .setup(let m): return m
+        case .stage(_, let m): return m
         }
+    }
+
+    var code: String? {
+        if case .stage(let code, _) = self { return code }
+        return nil
     }
 }
 

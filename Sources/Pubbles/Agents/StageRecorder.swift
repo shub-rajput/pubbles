@@ -18,17 +18,19 @@ final class StageRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
         self.url = url
     }
 
+    /// What to capture: the stage window plus Pubbles' full-screen overlay, cropped to the page.
     @MainActor
-    func start(stageRect: CGRect, stagePID: pid_t) async throws {
+    private static func capture(stageRect: CGRect, stagePID: pid_t) async throws -> (SCContentFilter, SCStreamConfiguration) {
         let content: SCShareableContent
         do {
             content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         } catch {
-            throw TakeError.setup("Pubbles needs Screen Recording permission to record (System Settings → Privacy & Security → Screen Recording)")
+            throw TakeError.stage(code: "permission_missing:screen_recording", message:
+                "Pubbles needs Screen Recording permission (Pubbles Settings, or System Settings → Privacy & Security → Screen Recording)")
         }
         let center = CGPoint(x: stageRect.midX, y: stageRect.midY)
         guard let display = content.displays.first(where: { CGDisplayBounds($0.displayID).contains(center) }) else {
-            throw TakeError.setup("Couldn't find the display the stage is on")
+            throw TakeError.stage(code: "stage_not_visible", message: "Couldn't find the display the stage is on")
         }
         let bounds = CGDisplayBounds(display.displayID)
         let ourPID = ProcessInfo.processInfo.processIdentifier
@@ -38,18 +40,31 @@ final class StageRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
         let overlays = content.windows.filter {
             $0.owningApplication?.processID == ourPID && $0.frame.width >= bounds.width && $0.frame.height >= bounds.height
         }
-        guard !stageWindows.isEmpty else { throw TakeError.setup("Couldn't find the stage window to record") }
-
+        guard !stageWindows.isEmpty else {
+            throw TakeError.stage(code: "stage_not_visible", message: "Couldn't find the stage window to capture")
+        }
         let scale = NSScreen.screens.first {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == display.displayID
         }?.backingScaleFactor ?? 2
-        let width = Int(stageRect.width * scale) & ~1, height = Int(stageRect.height * scale) & ~1
-
         let config = SCStreamConfiguration()
         config.sourceRect = stageRect.offsetBy(dx: -bounds.minX, dy: -bounds.minY)
-        config.width = width
-        config.height = height
+        config.width = Int(stageRect.width * scale) & ~1
+        config.height = Int(stageRect.height * scale) & ~1
         config.showsCursor = false // the ghost pointer is drawn by Pubbles
+        return (SCContentFilter(display: display, including: stageWindows + overlays), config)
+    }
+
+    /// One frame of the stage with Pubbles' overlay (bubbles, pins, doodles, ghost pointer).
+    @MainActor
+    static func snapshot(stageRect: CGRect, stagePID: pid_t) async throws -> CGImage {
+        let (filter, config) = try await capture(stageRect: stageRect, stagePID: stagePID)
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+    }
+
+    @MainActor
+    func start(stageRect: CGRect, stagePID: pid_t) async throws {
+        let (filter, config) = try await Self.capture(stageRect: stageRect, stagePID: stagePID)
+        let width = config.width, height = config.height
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         config.queueDepth = 6
         config.pixelFormat = kCVPixelFormatType_32BGRA
@@ -67,8 +82,7 @@ final class StageRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
         self.writer = writer
         self.input = input
 
-        let stream = SCStream(filter: SCContentFilter(display: display, including: stageWindows + overlays),
-                              configuration: config, delegate: nil)
+        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
         self.stream = stream

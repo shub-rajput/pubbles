@@ -282,10 +282,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Runs `claude mcp add` through a login shell (so the user's PATH finds `claude`), replacing any
-    /// earlier Pubbles entry.
+    /// earlier Pubbles entry. Feedback appears as a bubble at the pointer, since Pubbles has no window
+    /// in front when this is picked from the menubar; only a failure needs an alert.
     @objc private func addToClaudeCode() {
+        viewModel.showTemporaryPill(text: "adding to Claude Code…", timeout: 10)
         let script = "claude mcp remove --scope user pubbles >/dev/null 2>&1; \(MCPServer.claudeAddCommand)"
-        Task.detached {
+        Task.detached { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-lc", script]
@@ -302,13 +304,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } catch {
                 text = error.localizedDescription
             }
-            let message = ok
-                ? "Pubbles is added to Claude Code. Start a new Claude Code session to use it."
-                : "Couldn't add Pubbles to Claude Code:\n\(text.trimmingCharacters(in: .whitespacesAndNewlines))\n\nYou can paste the setup command yourself (Copy Setup Command)."
-            await MainActor.run {
+            await MainActor.run { [text] in
+                guard let self else { return }
+                if ok {
+                    self.viewModel.showTemporaryPill(text: "added to Claude Code · open a new session", timeout: 4)
+                    return
+                }
+                self.viewModel.dismiss()
                 let alert = NSAlert()
-                alert.messageText = ok ? "Added to Claude Code" : "Not added"
-                alert.informativeText = message
+                alert.messageText = "Couldn't add Pubbles to Claude Code"
+                alert.informativeText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    + "\n\nYou can paste the setup command yourself: Scripts → Copy Setup Command."
+                alert.layout()
+                alert.window.level = .floating // above other apps' windows even though Pubbles has none in front
                 NSApp.activate(ignoringOtherApps: true)
                 alert.runModal()
             }

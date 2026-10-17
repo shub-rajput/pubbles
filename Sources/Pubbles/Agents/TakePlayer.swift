@@ -29,12 +29,16 @@ final class TakePlayer {
         viewModel.moveGhost(to: start)
     }
 
-    func play(_ script: TakeScript) async throws {
+    /// Play the script, or only through scene `lastScene` (1-based) for a preview.
+    func play(_ script: TakeScript, through lastScene: Int? = nil) async throws {
         for (i, scene) in script.scenes.enumerated() {
+            if let lastScene, i >= lastScene { break }
             onScene?(i, scene.title)
             for (j, step) in scene.steps.enumerated() {
                 do {
                     try await perform(step)
+                } catch TakeError.target where step.optional == true {
+                    continue // optional step whose target didn't show up
                 } catch let error as TakeError {
                     throw TakeError.script("Scene \(i + 1) \"\(scene.title)\", step \(j + 1) (\(step.action)): \(error.localizedDescription)")
                 }
@@ -249,7 +253,10 @@ final class TakePlayer {
 
     // MARK: Motion
 
-    private func move(_ p: CGPoint) {
+    private func move(_ point: CGPoint) {
+        // The pointer never leaves the stage window.
+        let bounds = stage.screenRect.insetBy(dx: 2, dy: 2)
+        let p = CGPoint(x: min(max(point.x, bounds.minX), bounds.maxX), y: min(max(point.y, bounds.minY), bounds.maxY))
         pos = p
         if penDown {
             viewModel.ghostStrokeTo(p)

@@ -14,6 +14,7 @@ struct ScriptValidator {
 
     struct Report {
         var problems: [String] = []
+        var notes: [String] = []
         var estimatedSeconds: Double = 0
         var steps = 0
     }
@@ -39,7 +40,7 @@ struct ScriptValidator {
                     continue
                 }
                 if Self.needsTarget.contains(step.action) && step.target == nil { problem("needs a target") }
-                report.estimatedSeconds += estimate(step)
+                report.estimatedSeconds += estimate(step) * 1.08 // per-step overhead (page round trips, settling)
 
                 switch step.action {
                 case "say":
@@ -91,7 +92,11 @@ struct ScriptValidator {
             for (j, step) in scene.steps.enumerated() {
                 let at = "Scene \(i + 1) \"\(scene.title)\", step \(j + 1) (\(step.action))"
                 if let target = step.target, try await stage.viewportRect(target) == nil {
-                    report.problems.append("\(at): can't find \"\(target)\" on the page at this point")
+                    if step.optional == true {
+                        report.notes.append("\(at): \"\(target)\" isn't on the page right now; it's optional, so the take will skip it")
+                    } else {
+                        report.problems.append("\(at): can't find \"\(target)\" on the page at this point (if it only sometimes appears, like a cookie banner, add \"optional\": true)")
+                    }
                     continue
                 }
                 guard step.action == "scroll" else { continue }
@@ -108,20 +113,24 @@ struct ScriptValidator {
         return report
     }
 
-    /// Rough playing time of a step, matching TakePlayer's pacing.
+    /// Rough playing time of a step, matching TakePlayer's pacing: glides settle on a spring after
+    /// their eased path, typing averages ~0.052s a character with pauses on spaces and punctuation,
+    /// and scrolls add a settle and a check of where they landed.
     private func estimate(_ step: TakeScript.Step) -> Double {
-        let typing = Double(step.text?.count ?? 0) / 22 * 1.1
+        let chars = Double(step.text?.count ?? 0)
+        let lines = Double(step.text?.components(separatedBy: "\n").count ?? 1)
         switch step.action {
-        case "point", "click": return step.duration ?? 0.7
-        case "say": return typing + 0.2
-        case "type": return typing
+        case "point": return (step.duration ?? 0.55) + 0.25
+        case "click": return (step.duration ?? 0.55) + 0.5
+        case "say": return 0.18 + chars * 0.052 + (lines - 1) * 0.12
+        case "type": return chars * 0.058
         case "newline", "clear", "key": return 0.12
         case "pin", "dismiss": return 0.2
         case "hide": return 0.15
-        case "circle": return (step.duration ?? 0.9) + 0.75
-        case "underline": return (step.duration ?? 0.35) + 0.75
-        case "arrow": return (step.duration ?? 0.45) + 1.4
-        case "scroll": return (step.duration ?? 0.9) + 0.4
+        case "circle": return (step.duration ?? 0.9) + 1.0
+        case "underline": return (step.duration ?? 0.35) + 1.0
+        case "arrow": return (step.duration ?? 0.45) + 2.1
+        case "scroll": return (step.duration ?? 0.8) + 0.45
         case "wait": return step.seconds ?? 1
         default: return 0
         }

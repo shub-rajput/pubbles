@@ -10,6 +10,7 @@ struct GeneralSettingsView: View {
         Form {
             AccessibilityBannerSection()
             MicrophoneBannerSection()
+            ScreenRecordingBannerSection()
             Section {
                 Toggle("Multi-line Pubble", isOn: multiLineBinding)
 

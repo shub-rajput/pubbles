@@ -29,7 +29,10 @@ final class AgentTools {
         3. validate_script(script) and fix every problem it reports.
         4. save_script(id, script). Each save is a new version (v1, v2…); pass replace: true only if the user asked \
         to overwrite. It then shows in Pubbles' menubar under Scripts.
-        5. rehearse(id) (if the user allows it) to check it plays; fix, save and rehearse again if a scene fails.
+        5. rehearse(id) (if the user allows it) to check it plays; fix, save and rehearse again if a scene fails. \
+        preview_scene(id, scene) plays up to the end of a scene and returns a snapshot with the bubbles, pins and \
+        doodles, to check nothing important is covered. prepare_stage(id) sets the stage up without playing, if \
+        you want the user to look first.
         6. Recording: the user presses Record in Pubbles, or asks you to and record(id) is allowed. You get the \
         video path back. Changes later: get_script, edit, save_script (new version).
 
@@ -44,6 +47,16 @@ final class AgentTools {
         - wait {seconds}
         Optional "duration" on point/click/circle/underline/arrow/scroll sets its speed in seconds.
         Targets: a CSS selector or "text:Some words" (innermost visible element containing them).
+
+        Add "optional": true to a step whose target may not appear (cookie banners); the take skips it if missing.
+
+        Placement: the bubble's top-left corner sits about 12px below-right of the pointer, and it grows right and \
+        down, up to about 300px wide. A pin stays exactly where the bubble was. To keep page copy readable, point \
+        at empty space beside what you're explaining (anchor right/below plus an offset), and check with preview_scene.
+
+        Every take (menubar or tool) opens a fresh stage window in front, centred, and checks it's visible; if it \
+        can't, the take doesn't start and the result has a code (stage_not_visible, stage_occluded, \
+        viewport_too_large, permission_missing:screen_recording). Results include a "stage" block.
 
         Rules: doodles and pins stay fixed on the screen, not the page. Doodles are cleared before each scroll \
         automatically; dismiss pins before scrolling. Give each bubble time to be read (a wait of about 1s per 4–5 \
@@ -117,6 +130,10 @@ final class AgentTools {
                       idVersion, required: ["id"]),
             Self.tool("record", "Record a saved script (3-2-1 countdown, then the take) and wait for it to end. Returns the video path. Only when the user asks you to record and allows agents to record.",
                       idVersion, required: ["id"]),
+            Self.tool("preview_scene", "Play a saved script up to the end of one scene (1-based) and return a snapshot of the stage with Pubbles' bubbles, pins and doodles, to check placement. Same permission as rehearse.",
+                      ["id": ["type": "string"], "scene": ["type": "integer"], "version": ["type": "integer"]], required: ["id", "scene"]),
+            Self.tool("prepare_stage", "Open a fresh stage window for a saved script, in front and centred, and report whether it's visible. Doesn't play anything; use it to let the user look before a take.",
+                      idVersion, required: ["id"]),
             Self.tool("stop_take", "Stop the take that's playing."),
             Self.tool("take_status", "Whether a take is playing (and which scene), and how the last one ended."),
         ]
@@ -139,6 +156,8 @@ final class AgentTools {
                 return text(json(ScriptStore.list().map { ["id": $0.id, "name": $0.name, "versions": $0.versions] }))
             case "get_script": return try getScript(args)
             case "rehearse": return try await runTake(args, kind: .rehearsal)
+            case "preview_scene": return try await runTake(args, kind: .preview)
+            case "prepare_stage": return try await prepareStage(args)
             case "record": return try await runTake(args, kind: .recording)
             case "stop_take":
                 takes.stop()
@@ -147,6 +166,7 @@ final class AgentTools {
                 var status: [String: Any] = ["playing": takes.isRunning]
                 if let scene = takes.sceneLabel { status["scene"] = scene }
                 if let last = takes.lastResult { status["last"] = last }
+                if stage.isOpen { status["stage"] = stage.windowState().report }
                 return text(json(status))
             default:
                 return failure("Unknown tool \(name)")
@@ -164,7 +184,7 @@ final class AgentTools {
         let size = CGSize(width: (args["width"] as? NSNumber)?.doubleValue ?? 1440,
                           height: (args["height"] as? NSNumber)?.doubleValue ?? 900)
         try await stage.open(url: url, viewport: size)
-        return text("Stage open at \(url), viewport \(Int(size.width))×\(Int(size.height)). Use outline() and screenshot() to look around.")
+        return text("Stage open at \(url), viewport \(Int(size.width))×\(Int(size.height)), in the background (the user's work isn't interrupted). Use outline() and screenshot() to look around. Takes open a fresh stage in front automatically.")
     }
 
     private func scrollTo(_ args: [String: Any]) async throws -> [String: Any] {
@@ -214,7 +234,7 @@ final class AgentTools {
 
     private func runTake(_ args: [String: Any], kind: TakeController.Kind) async throws -> [String: Any] {
         switch kind {
-        case .rehearsal where !config.allowRehearse:
+        case .rehearsal where !config.allowRehearse, .preview where !config.allowRehearse:
             throw TakeError.setup("The user hasn't allowed agents to rehearse. Ask them to press Rehearse in Pubbles (menubar → Scripts).")
         case .recording where !config.allowRecord:
             throw TakeError.setup("The user hasn't allowed agents to record. Ask them to press Record in Pubbles (menubar → Scripts), or to allow it there.")
@@ -222,14 +242,43 @@ final class AgentTools {
         }
         try requireIdle()
         let (id, version) = try scriptRef(args)
-        takes.start(id: id, version: version, kind: kind)
+        var through: Int?
+        if kind == .preview {
+            let count = try ScriptStore.load(id: id, version: version).scenes.count
+            guard let scene = (args["scene"] as? NSNumber)?.intValue, (1...count).contains(scene) else {
+                throw TakeError.script("scene must be 1–\(count)")
+            }
+            through = scene
+        }
+        takes.start(id: id, version: version, kind: kind, throughScene: through)
         guard let result = await takes.waitForEnd() else { throw TakeError.setup("The take didn't start") }
         var out: [String: Any] = ["finished": result.finished, "stopped": result.stopped,
                                   "length": TakeController.clock(result.seconds), "script": "\(id) v\(version)"]
         if let error = result.error { out["error"] = error }
+        if let code = result.errorCode { out["code"] = code }
         if let file = result.file { out["video"] = file }
         if result.stopped { out["note"] = "The user stopped it (Esc or Stop)." }
-        return result.finished ? text(json(out)) : failure(json(out))
+        if var stage = result.stageAtStart?.report {
+            stage["coveredDuringTake"] = result.coveredDuringTake
+            out["stage"] = stage
+        }
+        var content: [[String: Any]] = [["type": "text", "text": json(out)]]
+        if let jpeg = result.snapshot {
+            content.insert(["type": "image", "data": jpeg.base64EncodedString(), "mimeType": "image/jpeg"], at: 0)
+        }
+        var reply: [String: Any] = ["content": content]
+        if !result.finished { reply["isError"] = true }
+        return reply
+    }
+
+    private func prepareStage(_ args: [String: Any]) async throws -> [String: Any] {
+        try requireIdle()
+        let (id, version) = try scriptRef(args)
+        let script = try ScriptStore.load(id: id, version: version)
+        try await stage.open(url: script.url, viewport: script.viewportSize, forTake: true)
+        let state = stage.windowState().report
+        return text(json(["script": "\(id) v\(version)", "stage": state,
+                          "note": "The stage is open in front. Ask the user if they can see it before a take."]))
     }
 
     // MARK: Helpers
@@ -279,9 +328,11 @@ final class AgentTools {
     }
 
     private func describe(_ report: ScriptValidator.Report, _ script: TakeScript) -> String {
-        let head = "\(script.scenes.count) scenes, \(report.steps) steps, about \(TakeController.clock(report.estimatedSeconds))."
-        guard !report.problems.isEmpty else { return "OK. " + head }
-        return head + "\nProblems:\n" + report.problems.map { "- " + $0 }.joined(separator: "\n")
+        var out = "\(script.scenes.count) scenes, \(report.steps) steps, about \(TakeController.clock(report.estimatedSeconds))."
+        if report.problems.isEmpty { out = "OK. " + out }
+        if !report.notes.isEmpty { out += "\nNotes:\n" + report.notes.map { "- " + $0 }.joined(separator: "\n") }
+        if !report.problems.isEmpty { out += "\nProblems:\n" + report.problems.map { "- " + $0 }.joined(separator: "\n") }
+        return out
     }
 
     private func json(_ value: Any) -> String {
