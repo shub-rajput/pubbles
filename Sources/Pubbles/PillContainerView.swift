@@ -79,6 +79,12 @@ struct PillContainerView: View {
                     .transition(.opacity)
             }
 
+            if viewModel.ghostCursorActive && isActiveScreen {
+                GhostCursorView()
+                    .offset(x: viewModel.cursorPosition.x, y: viewModel.cursorPosition.y)
+                    .allowsHitTesting(false)
+            }
+
             if viewModel.isVisible && isActiveScreen && !viewModel.pillHiddenForDrawing {
                 PillView(viewModel: viewModel)
                     .scaleEffect(springScale, anchor: .topLeading)
@@ -111,6 +117,17 @@ struct PillContainerView: View {
         )
     }
 
+}
+
+/// The system arrow, drawn by Pubbles for an agent's ghost pointer. Offset so its hotspot sits on
+/// the parent's offset point.
+private struct GhostCursorView: View {
+    private let cursor = NSCursor.arrow
+
+    var body: some View {
+        Image(nsImage: cursor.image)
+            .offset(x: -cursor.hotSpot.x, y: -cursor.hotSpot.y)
+    }
 }
 
 private struct PinnedPillView: View {

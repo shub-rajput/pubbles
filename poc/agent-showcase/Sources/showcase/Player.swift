@@ -38,8 +38,12 @@ struct Step: Decodable {
 /// Plays a script with real input: the real cursor moves, Pubbles is driven through its own
 /// hotkeys, and the page is scrolled with real wheel events and clicked with real clicks.
 ///
-/// The one rule it enforces: while the bubble is on, Pubbles owns the keyboard, so typing or
-/// pressing keys *into the page* needs a `hide` first. Clicks and scrolling pass through anyway.
+/// Two modes:
+/// - **ghost** (default): Pubbles draws the pointer, the page gets input over DevTools, and the
+///   user's real mouse and keyboard stay free.
+/// - **drive**: the real cursor moves, clicks and scrolls. Here the one rule is that while the
+///   bubble is on, Pubbles owns the keyboard, so typing or pressing keys *into the page* needs a
+///   `hide` first. Clicks and scrolling pass through anyway.
 ///
 /// Pubbles itself is driven through its agent control channel (see `Pubbles`), not hotkeys.
 final class Player {
@@ -48,10 +52,12 @@ final class Player {
     let browser: Browser
     let pubbles: Pubbles
 
+    private var doodledInDry = false
     private var scrollSign = 1.0
     private var scrollCalibrated = false
 
     private var bubbleOn: Bool { pubbles.state.active }
+    private var ghost: Bool { input.sink != nil }
 
     init(input: Input, motion: Motion, browser: Browser, pubbles: Pubbles) {
         self.input = input
@@ -81,7 +87,7 @@ final class Player {
             try showBubble()
             for (i, line) in text.components(separatedBy: "\n").enumerated() {
                 if i > 0 { try pubbles.send("newline"); input.sleep(0.12) }
-                try motion.type(line) { try self.pubbles.send("type", ["text": String($0)]) }
+                try motion.type(line, drift: .zero) { try self.pubbles.send("type", ["text": String($0)]) }
             }
 
         case "newline":
@@ -126,6 +132,7 @@ final class Player {
             try doodle(Shapes.arrow(from: start, to: tip), durations: [step.duration ?? 0.45, 0.12, 0.12])
 
         case "scroll":
+            try prepareForScroll()
             if let target = step.target {
                 try scroll(to: target, align: step.align ?? 0.15, duration: step.duration)
             } else if let by = step.by {
@@ -137,16 +144,25 @@ final class Player {
         case "click":
             try motion.glide(to: try point(step), duration: step.duration)
             input.sleep(0.08)
-            input.click()
+            if ghost { try browser.click(at: input.pos) } else { input.click() }
             input.sleep(0.1)
             if pubbles.clickToDismiss { try pubbles.send("state") }
 
         case "type":
             guard let text = step.text else { throw DriverError.script("type needs text") }
-            try requirePageKeyboard(step)
-            try motion.type(text)
+            if ghost {
+                try motion.type(text, drift: .zero) { try self.browser.typeChar($0) }
+            } else {
+                try requirePageKeyboard(step)
+                try motion.type(text, drift: .zero)
+            }
 
         case "key":
+            if ghost {
+                try browser.key(step.key ?? "")
+                input.sleep(0.12)
+                break
+            }
             guard let name = step.key, let code = Self.keyCodes[name.lowercased()] else {
                 throw DriverError.script("unknown key \(step.key ?? "nil"); known: \(Self.keyCodes.keys.sorted().joined(separator: ", "))")
             }
@@ -158,7 +174,7 @@ final class Player {
             input.sleep(0.12)
 
         case "wait":
-            try motion.hold(step.seconds ?? 1)
+            try motion.hold(step.seconds ?? 1, drift: 0)
 
         default:
             throw DriverError.script("unknown action \"\(step.action)\"")
@@ -176,10 +192,29 @@ final class Player {
     /// Doodles need an active bubble (that's when Pubbles' overlay accepts drags as strokes).
     private func doodle(_ strokes: [[CGPoint]], durations: [Double]) throws {
         try showBubble()
-        try pubbles.send("draw", ["on": true])
-        input.sleep(0.06) // let the overlay start taking mouse events
-        defer { _ = try? pubbles.send("draw", ["on": false]) }
-        try motion.doodle(strokes, durations: durations, holdCmd: false)
+        if ghost {
+            // Pen strokes go to Pubbles through the ghost sink; no drawing mode, mouse untouched.
+            try motion.doodle(strokes, durations: durations, holdCmd: false)
+        } else {
+            try pubbles.send("draw", ["on": true])
+            input.sleep(0.06) // let the overlay start taking mouse events
+            defer { _ = try? pubbles.send("draw", ["on": false]) }
+            try motion.doodle(strokes, durations: durations, holdCmd: false)
+        }
+        if input.dry { doodledInDry = true }
+    }
+
+    /// Doodles and pins are pinned to the screen, not the page, so scrolling would leave them over
+    /// the wrong content. Doodles are cleared automatically; pins are deliberate, so that's an error.
+    private func prepareForScroll() throws {
+        if pubbles.state.pins > 0 {
+            throw DriverError.script("pins stay fixed on screen while the page scrolls; dismiss them first")
+        }
+        if pubbles.state.strokes > 0 || doodledInDry {
+            try pubbles.send("clearStrokes")
+            doodledInDry = false
+            input.sleep(0.25)
+        }
     }
 
     // MARK: Rules
@@ -190,7 +225,7 @@ final class Player {
 
     private func requirePageKeyboard(_ step: Step) throws {
         guard !bubbleOn else {
-            throw DriverError.script("the bubble is on, so Pubbles would capture this \(step.action); add a hide first")
+            throw DriverError.script("drive mode: the bubble is on, so Pubbles would capture this \(step.action); add a hide first")
         }
     }
 

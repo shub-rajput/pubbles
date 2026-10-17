@@ -8,9 +8,9 @@ final class Motion {
     static let fps = 120.0
     private let dt = 1.0 / fps
 
-    // Spring: ω ≈ 21 rad/s, ζ 0.7 → a hint of overshoot, never wobbly.
+    // Spring: ω ≈ 21 rad/s, critically damped (ζ 1) → smooth arrival, no overshoot.
     var stiffness = 440.0
-    var damping = 2 * 0.7 * sqrt(440.0)
+    var damping = 2 * 1.0 * sqrt(440.0)
 
     init(input: Input) { self.input = input }
 
@@ -36,8 +36,8 @@ final class Motion {
         let dy = target.y - start.y
         let dist = hypot(dx, dy)
         guard dist > 1 else { return }
-        let T = duration ?? min(0.75, max(0.28, 0.2 + Double(dist) / 2600))
-        let bend = arc ?? (Double.random(in: 0.05...0.13) * (Bool.random() ? 1 : -1))
+        let T = duration ?? min(1.1, max(0.45, 0.3 + Double(dist) / 1800))
+        let bend = arc ?? (Double.random(in: 0.03...0.07) * (Bool.random() ? 1 : -1))
         // Control point pushed sideways from the midpoint → a soft arc instead of a ruler line.
         let ctrl = CGPoint(x: start.x + dx / 2 - dy * bend, y: start.y + dy / 2 + dx * bend)
 

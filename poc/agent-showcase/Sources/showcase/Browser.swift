@@ -188,6 +188,52 @@ final class Browser {
     /// Instant scroll (dry runs only; real takes scroll with the wheel).
     func jumpScroll(to y: Double) throws { try page.eval("window.scrollTo(0, \(y)); true") }
 
+    // MARK: Page input (ghost mode): straight to the page over DevTools, real mouse untouched
+
+    /// Mouse event at a screen point; ignored outside the viewport.
+    func mouse(_ type: String, at p: CGPoint, button: String = "none", clickCount: Int = 0, deltaY: Double = 0) throws {
+        let x = Double(p.x - origin.x), y = Double(p.y - origin.y)
+        guard x >= 0, y >= 0, x < Double(viewport.width), y < Double(viewport.height) else { return }
+        var params: [String: Any] = ["type": type, "x": x, "y": y, "button": button, "clickCount": clickCount]
+        if type == "mouseWheel" {
+            params["deltaX"] = 0
+            params["deltaY"] = deltaY
+        }
+        try page.call("Input.dispatchMouseEvent", params)
+    }
+
+    func click(at p: CGPoint) throws {
+        try mouse("mouseMoved", at: p)
+        try mouse("mousePressed", at: p, button: "left", clickCount: 1)
+        Thread.sleep(forTimeInterval: 0.05)
+        try mouse("mouseReleased", at: p, button: "left", clickCount: 1)
+    }
+
+    func typeChar(_ ch: Character) throws {
+        let s = String(ch)
+        try page.call("Input.dispatchKeyEvent", ["type": "keyDown", "key": s, "text": s, "unmodifiedText": s])
+        try page.call("Input.dispatchKeyEvent", ["type": "keyUp", "key": s])
+    }
+
+    private static let pageKeys: [String: (key: String, code: String, vk: Int, text: String?)] = [
+        "escape": ("Escape", "Escape", 27, nil), "return": ("Enter", "Enter", 13, "\r"),
+        "space": (" ", "Space", 32, " "), "tab": ("Tab", "Tab", 9, nil),
+        "pagedown": ("PageDown", "PageDown", 34, nil), "pageup": ("PageUp", "PageUp", 33, nil),
+        "down": ("ArrowDown", "ArrowDown", 40, nil), "up": ("ArrowUp", "ArrowUp", 38, nil),
+    ]
+
+    func key(_ name: String) throws {
+        guard let k = Self.pageKeys[name.lowercased()] else {
+            throw DriverError.script("unknown key \(name); known: \(Self.pageKeys.keys.sorted().joined(separator: ", "))")
+        }
+        var down: [String: Any] = ["type": k.text == nil ? "rawKeyDown" : "keyDown", "key": k.key, "code": k.code,
+                                   "windowsVirtualKeyCode": k.vk, "nativeVirtualKeyCode": k.vk]
+        if let t = k.text { down["text"] = t }
+        try page.call("Input.dispatchKeyEvent", down)
+        try page.call("Input.dispatchKeyEvent", ["type": "keyUp", "key": k.key, "code": k.code,
+                                                 "windowsVirtualKeyCode": k.vk, "nativeVirtualKeyCode": k.vk])
+    }
+
     /// Bring this Chrome instance to the front.
     func activate() {
         let pids = shell("/usr/sbin/lsof", ["-ti", "tcp:\(port)", "-sTCP:LISTEN"])

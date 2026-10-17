@@ -12,6 +12,7 @@ final class Pubbles {
         var active = false
         var pins = 0
         var drawing = false
+        var strokes = 0
     }
 
     let dry: Bool
@@ -45,6 +46,7 @@ final class Pubbles {
             case "dismissAll": state = State()
             case "pin": state.pins += 1
             case "draw": state.drawing = (extra["on"] as? Bool) ?? false
+            case "clearStrokes": state.strokes = 0
             default: break
             }
             return state
@@ -59,11 +61,20 @@ final class Pubbles {
         while Date() < deadline {
             CFRunLoopRunInMode(.defaultMode, 0.005, true)
             if let r = lastReply, (r["seq"] as? Int) == seq {
-                state = State(active: r["active"] as? Bool ?? false, pins: r["pins"] as? Int ?? 0, drawing: r["drawing"] as? Bool ?? false)
+                state = State(active: r["active"] as? Bool ?? false, pins: r["pins"] as? Int ?? 0, drawing: r["drawing"] as? Bool ?? false, strokes: r["strokes"] as? Int ?? 0)
                 return state
             }
         }
         throw DriverError.preflight("Pubbles didn't answer \"\(cmd)\"; is it a build with agent control? (./scripts/build.sh)")
+    }
+
+    /// Fire-and-forget command (per-frame ghost moves and stroke points); Pubbles doesn't answer.
+    func post(_ cmd: String, _ extra: [String: Any] = [:]) {
+        guard !dry else { return }
+        var info = extra
+        info["cmd"] = cmd
+        info["quiet"] = true
+        DistributedNotificationCenter.default().postNotificationName(Self.commandName, object: nil, userInfo: info, deliverImmediately: true)
     }
 
     private func loadConfig() {

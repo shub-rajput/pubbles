@@ -13,6 +13,7 @@ final class CursorTracker {
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             MainActor.assumeIsolated {
+                guard !self.viewModel.ghostCursorActive else { return }
                 let mouseLocation = NSEvent.mouseLocation
                 let screen = NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) }
                     ?? NSScreen.main

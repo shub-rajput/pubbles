@@ -19,8 +19,18 @@ enum DriverError: Error, CustomStringConvertible {
     }
 }
 
-/// Posts real macOS mouse + keyboard events (needs Accessibility permission for the terminal).
+/// Where pointer motion goes instead of the real mouse (ghost mode).
+protocol PointerSink: AnyObject {
+    func move(_ p: CGPoint, drawing: Bool)
+    func penDown(_ p: CGPoint)
+    func penUp(_ p: CGPoint)
+    func wheel(_ dy: Int32, at p: CGPoint)
+}
+
+/// Posts real macOS mouse + keyboard events (needs Accessibility permission for the terminal),
+/// or, with a `sink`, hands pointer motion to a ghost pointer and leaves the real mouse alone.
 /// Tracks where it last put the cursor so it can tell when a human grabs the mouse, and stops.
+/// Everything it posts is stamped with `KeyWatcher.marker` so the Esc watcher ignores it.
 final class Input {
     let source = CGEventSource(stateID: .hidSystemState)
     private(set) var pos: CGPoint
@@ -29,6 +39,8 @@ final class Input {
     private(set) var buttonDown = false
     var dry = false
     var watchForHuman = true
+    /// Ghost mode: pointer events go here; the real mouse is the user's.
+    weak var sink: PointerSink?
     private var strikes = 0
 
     init() {
@@ -39,10 +51,12 @@ final class Input {
 
     // MARK: Safety
 
-    /// Abort if the real cursor is far from where we last put it (someone moved the mouse),
-    /// or if Esc is physically held down.
+    /// Abort if Esc was pressed, or (when driving the real cursor) if it's far from where we last
+    /// put it (someone moved the mouse).
     func checkAbort() throws {
-        guard watchForHuman, !dry else { return }
+        guard !dry else { return }
+        if keyWatcher.stopRequested { throw DriverError.aborted("Esc pressed") }
+        guard watchForHuman, sink == nil else { return }
         let actual = CGEvent(source: nil)?.location ?? pos
         let off = min(hypot(actual.x - pos.x, actual.y - pos.y), hypot(actual.x - prevPos.x, actual.y - prevPos.y))
         // Two off-track readings in a row = a human grabbed the mouse.
@@ -62,7 +76,19 @@ final class Input {
     private func post(_ type: CGEventType, _ p: CGPoint, button: CGMouseButton = .left) {
         prevPos = pos
         pos = p
-        guard !dry, let e = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: p, mouseButton: button) else { return }
+        guard !dry else { return }
+        if let sink {
+            switch type {
+            case .mouseMoved: sink.move(p, drawing: false)
+            case .leftMouseDragged: sink.move(p, drawing: true)
+            case .leftMouseDown: sink.penDown(p)
+            case .leftMouseUp: sink.penUp(p)
+            default: break
+            }
+            return
+        }
+        guard let e = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: p, mouseButton: button) else { return }
+        e.setIntegerValueField(.eventSourceUserData, value: KeyWatcher.marker)
         e.flags = cmdHeld ? .maskCommand : []
         if type != .mouseMoved && type != .leftMouseDragged {
             e.setIntegerValueField(.mouseEventClickState, value: 1)
@@ -102,8 +128,10 @@ final class Input {
     /// One frame of trackpad-style (pixel, continuous) scrolling at the current cursor position.
     /// Positive `dy` moves the content up, i.e. scrolls the page down (sign is calibrated by Player).
     func scroll(_ dy: Int32) {
-        guard !dry, dy != 0,
-              let e = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1, wheel1: -dy, wheel2: 0, wheel3: 0) else { return }
+        guard !dry, dy != 0 else { return }
+        if let sink { sink.wheel(dy, at: pos); return }
+        guard let e = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1, wheel1: -dy, wheel2: 0, wheel3: 0) else { return }
+        e.setIntegerValueField(.eventSourceUserData, value: KeyWatcher.marker)
         e.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
         e.location = pos
         e.post(tap: .cghidEventTap)
@@ -114,6 +142,7 @@ final class Input {
     func setCmd(_ on: Bool) {
         cmdHeld = on
         guard !dry, let e = CGEvent(keyboardEventSource: source, virtualKey: Keys.command, keyDown: on) else { return }
+        e.setIntegerValueField(.eventSourceUserData, value: KeyWatcher.marker)
         e.type = .flagsChanged
         e.flags = on ? .maskCommand : []
         e.post(tap: .cghidEventTap)
@@ -123,6 +152,7 @@ final class Input {
         guard !dry else { return }
         for down in [true, false] {
             guard let e = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { continue }
+            e.setIntegerValueField(.eventSourceUserData, value: KeyWatcher.marker)
             e.flags = flags.union(cmdHeld ? .maskCommand : [])
             if let text {
                 let utf16 = Array(text.utf16)
