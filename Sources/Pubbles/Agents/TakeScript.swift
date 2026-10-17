@@ -84,3 +84,25 @@ enum ScriptStore {
         return try JSONDecoder().decode(TakeScript.self, from: data)
     }
 }
+
+extension ScriptStore {
+    /// Script ids are folder names: lowercase letters, digits and dashes.
+    static func isValidID(_ id: String) -> Bool {
+        id.range(of: "^[a-z0-9][a-z0-9-]{0,63}$", options: .regularExpression) != nil
+    }
+
+    /// Save as a new version, or over the latest one with `replace`. Returns the version written.
+    static func save(_ script: TakeScript, id: String, replace: Bool) throws -> Int {
+        guard isValidID(id) else {
+            throw TakeError.script("Script ids are lowercase letters, digits and dashes, like \"pubbles-app-tour\"")
+        }
+        let existing = list().first { $0.id == id }?.versions ?? []
+        let version = replace ? (existing.last ?? 1) : (existing.last ?? 0) + 1
+        let url = fileURL(id: id, version: version)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(script).write(to: url, options: .atomic)
+        return version
+    }
+}

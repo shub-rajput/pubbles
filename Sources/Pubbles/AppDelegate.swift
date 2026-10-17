@@ -15,6 +15,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var dictationCancellable: AnyCancellable?
     private var agentControl: AgentControl!
     private var takeController: TakeController!
+    private var mcpServer: MCPServer!
+    private var agentsConfigCancellable: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         overlayController = OverlayController(viewModel: viewModel)
@@ -27,6 +29,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.takeController.start(id: id, version: version, kind: record ? .recording : .rehearsal)
         }
         agentControl.onStopTake = { [weak self] in self?.takeController.stop() }
+        mcpServer = MCPServer(tools: AgentTools(takes: takeController))
+        // The MCP server only listens while agent access is on.
+        agentsConfigCancellable = ConfigManager.shared.$config
+            .map { $0.agents.enabled }
+            .removeDuplicates()
+            .sink { [weak self] enabled in
+                if enabled { self?.mcpServer.start() } else { self?.mcpServer.stop() }
+            }
         agentControl.takeStatus = { [weak self] in
             guard let take = self?.takeController else { return [:] }
             var status: [String: Any] = ["running": take.isRunning]
@@ -235,7 +245,74 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         submenu.addItem(NSMenuItem.separator())
         submenu.addItem(NSMenuItem(title: "Open Recordings Folder", action: #selector(openRecordingsFolder), keyEquivalent: ""))
         submenu.addItem(NSMenuItem(title: "Open Scripts Folder", action: #selector(openScriptsFolder), keyEquivalent: ""))
+
+        submenu.addItem(NSMenuItem.separator())
+        let agents = ConfigManager.shared.config.agents
+        let toggles: [(String, String, Bool)] = [
+            ("Let Agents Control Pubbles", "enabled", agents.enabled),
+            ("Agents Can Rehearse", "allowRehearse", agents.allowRehearse),
+            ("Agents Can Record", "allowRecord", agents.allowRecord),
+        ]
+        for (i, (title, key, on)) in toggles.enumerated() {
+            let item = NSMenuItem(title: title, action: (i == 0 || agents.enabled) ? #selector(toggleAgentSetting(_:)) : nil, keyEquivalent: "")
+            item.representedObject = key
+            item.state = on ? .on : .off
+            if i > 0 { item.indentationLevel = 1 }
+            submenu.addItem(item)
+        }
+        if agents.enabled {
+            let status = mcpServer.problem ?? (mcpServer.isListening ? "Listening on \(MCPServer.endpoint)" : "Starting…")
+            let statusItem = NSMenuItem(title: status, action: nil, keyEquivalent: "")
+            statusItem.indentationLevel = 1
+            submenu.addItem(statusItem)
+            submenu.addItem(NSMenuItem(title: "Add to Claude Code", action: #selector(addToClaudeCode), keyEquivalent: ""))
+            submenu.addItem(NSMenuItem(title: "Copy Setup Command", action: #selector(copySetupCommand), keyEquivalent: ""))
+        }
         return submenu
+    }
+
+    @objc private func toggleAgentSetting(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        ConfigManager.shared.setAgentsValue(key, sender.state != .on)
+    }
+
+    @objc private func copySetupCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(MCPServer.claudeAddCommand, forType: .string)
+    }
+
+    /// Runs `claude mcp add` through a login shell (so the user's PATH finds `claude`), replacing any
+    /// earlier Pubbles entry.
+    @objc private func addToClaudeCode() {
+        let script = "claude mcp remove --scope user pubbles >/dev/null 2>&1; \(MCPServer.claudeAddCommand)"
+        Task.detached {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            process.arguments = ["-lc", script]
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = output
+            var text: String
+            var ok = false
+            do {
+                try process.run()
+                process.waitUntilExit()
+                text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                ok = process.terminationStatus == 0
+            } catch {
+                text = error.localizedDescription
+            }
+            let message = ok
+                ? "Pubbles is added to Claude Code. Start a new Claude Code session to use it."
+                : "Couldn't add Pubbles to Claude Code:\n\(text.trimmingCharacters(in: .whitespacesAndNewlines))\n\nYou can paste the setup command yourself (Copy Setup Command)."
+            await MainActor.run {
+                let alert = NSAlert()
+                alert.messageText = ok ? "Added to Claude Code" : "Not added"
+                alert.informativeText = message
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        }
     }
 
     @objc private func runTake(_ sender: NSMenuItem) {

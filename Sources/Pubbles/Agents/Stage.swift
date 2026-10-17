@@ -29,14 +29,28 @@ final class Stage {
 
     // MARK: Opening
 
-    /// Launch (or reuse) the stage window, size it, and load `url` fresh, scrolled to the top.
-    func open(url: String, viewport: CGSize) async throws {
+    /// Launch (or reuse) the stage window and load `url` fresh, scrolled to the top.
+    ///
+    /// For a take, the stage comes to the front and the real window is fitted, since the ghost
+    /// pointer and the recording need its true position. For exploring (agents looking around,
+    /// validating), the page is just told to lay out at the video size: nothing comes to the front,
+    /// and it works even while the window is covered.
+    func open(url: String, viewport: CGSize, forTake: Bool = false) async throws {
         self.viewport = viewport
         if await DevTools.getJSON(endpoint("/json/version")) == nil {
             try launchChrome(url: url)
         }
         try await attach()
-        try await fitWindow()
+        if forTake {
+            try await requirePage().call("Emulation.clearDeviceMetricsOverride")
+            activate()
+            try await Task.sleep(for: .milliseconds(300))
+            try await fitWindow()
+        } else {
+            try await requirePage().call("Emulation.setDeviceMetricsOverride", [
+                "width": Int(viewport.width), "height": Int(viewport.height), "deviceScaleFactor": 0, "mobile": false,
+            ])
+        }
         try await load(url)
     }
 
@@ -55,6 +69,10 @@ final class Stage {
             "--no-default-browser-check",
             "--hide-crash-restore-bubble",
             "--disable-features=Translate,MediaRouter",
+            // Keep the page live while other windows cover the stage (agents explore in the background).
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-background-timer-throttling",
             "--window-size=\(Int(viewport.width)),\(Int(viewport.height) + 40)",
         ]
         chrome.standardOutput = FileHandle.nullDevice
@@ -114,12 +132,20 @@ final class Stage {
         guard let browser else { throw TakeError.devTools("not attached") }
         let win = try await browser.call("Browser.getWindowForTarget", ["targetId": targetID])
         guard let windowID = win["windowId"] as? Int else { throw TakeError.devTools("no window id") }
+        // Un-minimize first, and give it a moment: a minimized or hidden window reports sizes that
+        // would make the maths below shrink it to nothing.
         try await browser.call("Browser.setWindowBounds", ["windowId": windowID, "bounds": ["windowState": "normal"]])
+        try await Task.sleep(for: .milliseconds(300))
         let screen = CGDisplayBounds(CGMainDisplayID())
         var info = try await screenInfo()
-        for _ in 0..<4 {
-            let w = viewport.width + info.outer.width - info.inner.width
-            let h = viewport.height + info.outer.height - info.inner.height
+        for _ in 0..<5 {
+            // Window frame around the page; fall back to app-mode defaults if the numbers look wrong.
+            var frameW = info.outer.width - info.inner.width
+            var frameH = info.outer.height - info.inner.height
+            if !(0...120).contains(frameW) { frameW = 0 }
+            if !(0...160).contains(frameH) { frameH = 28 }
+            let w = viewport.width + frameW
+            let h = viewport.height + frameH
             try await browser.call("Browser.setWindowBounds", ["windowId": windowID, "bounds": [
                 "left": Int(screen.midX - w / 2), "top": Int(max(screen.minY + 30, screen.midY - h / 2)),
                 "width": Int(w), "height": Int(h),
@@ -202,6 +228,73 @@ final class Stage {
 
     func maxScrollY() async throws -> Double {
         (try await requirePage().eval("document.documentElement.scrollHeight - window.innerHeight") as? NSNumber)?.doubleValue ?? 0
+    }
+
+    // MARK: Exploring (for agents, between takes)
+
+    var isOpen: Bool { page != nil }
+
+    func currentURL() async throws -> String {
+        (try await requirePage().eval("location.href") as? String) ?? ""
+    }
+
+    /// Instant scroll, for looking around (takes scroll with the wheel).
+    func jumpScroll(to y: Double) async throws {
+        try await requirePage().eval("window.scrollTo(0, \(y)); true")
+        try await Task.sleep(for: .milliseconds(150))
+    }
+
+    /// Headings, buttons, links, images and fields with a target an agent can use as-is, their
+    /// position on the page, and whether they're in view right now.
+    func outline(limit: Int = 150) async throws -> [String: Any] {
+        let js = """
+        (() => {
+          const label = (e) => (e.getAttribute('aria-label') || e.alt || e.innerText || e.value || e.placeholder || '')
+            .trim().replace(/\\s+/g, ' ');
+          const target = (e) => {
+            if (e.id) return '#' + CSS.escape(e.id);
+            if (e.tagName === 'IMG' && e.alt) return 'img[alt="' + e.alt.replace(/"/g, '\\\\"') + '"]';
+            const t = label(e);
+            return t && t.length <= 60 ? 'text:' + t : null;
+          };
+          const items = [], seen = new Set();
+          document.querySelectorAll('h1,h2,h3,h4,button,a[href],img,input,textarea,select,[role=button],video').forEach((e) => {
+            const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+            if (r.width === 0 || r.height === 0 || s.display === 'none' || s.visibility === 'hidden') return;
+            const t = target(e);
+            if (!t || seen.has(t)) return;
+            seen.add(t);
+            items.push({ kind: e.tagName.toLowerCase(), label: label(e).slice(0, 80), target: t,
+                         pageY: Math.round(r.top + scrollY), inView: r.bottom > 0 && r.top < innerHeight });
+          });
+          return { url: location.href, title: document.title, scrollY: Math.round(scrollY),
+                   pageHeight: document.documentElement.scrollHeight, viewport: [innerWidth, innerHeight],
+                   items: items.slice(0, \(limit)) };
+        })()
+        """
+        return (try await requirePage().eval(js) as? [String: Any]) ?? [:]
+    }
+
+    /// JPEG of the page viewport (not Pubbles' overlay), downscaled to `width` px.
+    func screenshot(width: CGFloat = 960) async throws -> Data {
+        let result = try await requirePage().call("Page.captureScreenshot", ["format": "png"])
+        guard let b64 = result["data"] as? String, let png = Data(base64Encoded: b64),
+              let image = NSImage(data: png) else { throw TakeError.devTools("screenshot failed") }
+        let scale = width / max(1, viewport.width)
+        let size = NSSize(width: (viewport.width * scale).rounded(), height: (viewport.height * scale).rounded())
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
+            throw TakeError.devTools("screenshot failed")
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image.draw(in: NSRect(origin: .zero, size: size))
+        NSGraphicsContext.restoreGraphicsState()
+        guard let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.7]) else {
+            throw TakeError.devTools("screenshot failed")
+        }
+        return jpeg
     }
 
     // MARK: Page input (straight to the page; the real mouse and keyboard stay the user's)

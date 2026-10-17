@@ -52,6 +52,13 @@ struct BehaviorConfig: Codable, Sendable {
     var wiggleSensitivity: String = "medium"  // "low" | "medium" | "high"
 }
 
+/// Pubbles for Agents: whether agents may connect (MCP server), and what they may start themselves.
+struct AgentsConfig: Codable, Sendable, Equatable {
+    var enabled: Bool = false
+    var allowRehearse: Bool = true
+    var allowRecord: Bool = false
+}
+
 struct AppConfig: Codable, Sendable {
     var hotkey: String = "cmd+/"
     var drawingHotkey: String = "cmd"
@@ -61,6 +68,7 @@ struct AppConfig: Codable, Sendable {
     var theme: String? = nil
     var style: StyleConfig = StyleConfig()
     var behavior: BehaviorConfig = BehaviorConfig()
+    var agents: AgentsConfig = AgentsConfig()
 }
 
 @MainActor
@@ -483,6 +491,14 @@ class ConfigManager: ObservableObject {
             dict["style"] = styleDict
             writeConfigDict(dict)
         }
+    }
+
+    func setAgentsValue(_ key: String, _ value: Any) {
+        guard var dict = readConfigDict() else { return }
+        var agentsDict = dict["agents"] as? [String: Any] ?? [:]
+        agentsDict[key] = value
+        dict["agents"] = agentsDict
+        writeConfigDict(dict)
     }
 
     func setStyleValue(_ key: String, _ value: Any) {

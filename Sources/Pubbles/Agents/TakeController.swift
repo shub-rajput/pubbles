@@ -4,21 +4,42 @@ import AppKit
 /// recording) captures just the stage. One take at a time; Esc or Stop cancels it.
 @MainActor
 final class TakeController {
-    enum Kind { case rehearsal, recording }
+    enum Kind: String { case rehearsal, recording }
+
+    struct Result: Sendable {
+        var kind: String
+        var script: String
+        var version: Int
+        var finished: Bool   // played to the end
+        var stopped: Bool    // Esc / Stop
+        var error: String?   // why it couldn't finish (scene and step included)
+        var seconds: Double
+        var file: String?    // recording path
+
+        var summary: String {
+            var parts = [finished ? "\(kind) finished" : stopped ? "\(kind) stopped" : "\(kind) failed",
+                         TakeController.clock(seconds)]
+            if let error { parts.append(error) }
+            if let file { parts.append("saved to \((file as NSString).lastPathComponent)") }
+            return parts.joined(separator: " · ")
+        }
+    }
 
     private let viewModel: SubtitleViewModel
-    private let stage = Stage()
+    /// The stage, shared with agent tools (they explore it between takes).
+    let stage = Stage()
     private var task: Task<Void, Never>?
+    private var waiters: [CheckedContinuation<Result, Never>] = []
 
     private(set) var kind: Kind?
     private(set) var sceneLabel: String?
     private(set) var startedAt: Date?
-    /// How the last take ended, in full (the bubble only has room for a short version).
-    private(set) var lastResult: String?
+    private(set) var lastTake: Result?
     /// Called whenever the running state changes (for the menubar).
     var onChange: (() -> Void)?
 
     var isRunning: Bool { task != nil }
+    var lastResult: String? { lastTake?.summary }
 
     init(viewModel: SubtitleViewModel) {
         self.viewModel = viewModel
@@ -28,13 +49,22 @@ final class TakeController {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/Pubbles")
     }
 
-    func start(id: String, version: Int, kind: Kind) {
-        guard task == nil else { return }
+    /// Start a take; false if one is already running.
+    @discardableResult
+    func start(id: String, version: Int, kind: Kind) -> Bool {
+        guard task == nil else { return false }
         self.kind = kind
         sceneLabel = "Preparing"
         startedAt = nil
         onChange?()
         task = Task { await run(id: id, version: version, kind: kind) }
+        return true
+    }
+
+    /// Wait for the running take to end (returns the last result right away if none is running).
+    func waitForEnd() async -> Result? {
+        guard task != nil else { return lastTake }
+        return await withCheckedContinuation { waiters.append($0) }
     }
 
     func stop() {
@@ -43,14 +73,13 @@ final class TakeController {
 
     private func run(id: String, version: Int, kind: Kind) async {
         var recorder: StageRecorder?
+        var result = Result(kind: kind.rawValue, script: id, version: version, finished: false, stopped: false, seconds: 0)
         var message: String
-        var detail: String? = nil
         do {
             let script = try ScriptStore.load(id: id, version: version)
             viewModel.dismissAll()
             viewModel.takeInProgress = true
-            try await stage.open(url: script.url, viewport: script.viewportSize)
-            stage.activate()
+            try await stage.open(url: script.url, viewport: script.viewportSize, forTake: true)
 
             let start = stage.vp(script.viewportSize.width * 0.5, script.viewportSize.height * 0.55)
             let player = TakePlayer(stage: stage, viewModel: viewModel, start: start)
@@ -71,19 +100,20 @@ final class TakeController {
             onChange?()
 
             try await player.play(script)
-            let length = Date().timeIntervalSince(startedAt ?? Date())
-            message = kind == .recording ? "take saved · \(Self.clock(length))" : "rehearsal ok · \(Self.clock(length))"
+            result.finished = true
+            message = kind == .recording ? "take saved" : "rehearsal ok"
         } catch is CancellationError {
+            result.stopped = true
             message = recorder?.startedAt == nil ? "take stopped" : "stopped · partial saved"
         } catch {
+            result.error = error.localizedDescription
             message = "take stopped · see menu"
-            detail = error.localizedDescription
         }
 
+        result.seconds = startedAt.map { Date().timeIntervalSince($0) } ?? 0
         await recorder?.stop()
-        let saved = recorder?.startedAt != nil ? recorder?.url.lastPathComponent : nil
-        lastResult = [detail ?? message, saved.map { "Saved to \($0)" }]
-            .compactMap { $0 }.joined(separator: " · ")
+        if recorder?.startedAt != nil { result.file = recorder?.url.path }
+        if result.finished { message += " · \(Self.clock(result.seconds))" }
 
         // Say how it went where the ghost pointer is, then hand the screen back.
         viewModel.dismissAll()
@@ -95,11 +125,15 @@ final class TakeController {
         viewModel.hideGhost()
         viewModel.takeInProgress = false
 
+        lastTake = result
         task = nil
         self.kind = nil
         sceneLabel = nil
         startedAt = nil
         onChange?()
+        let waiting = waiters
+        waiters.removeAll()
+        for waiter in waiting { waiter.resume(returning: result) }
     }
 
     /// 3-2-1 in a bubble at the ghost pointer, before the recording starts (so it's not in the video).
@@ -114,7 +148,7 @@ final class TakeController {
         try await Task.sleep(for: .milliseconds(500)) // let it fade
     }
 
-    static func clock(_ seconds: TimeInterval) -> String {
+    nonisolated static func clock(_ seconds: TimeInterval) -> String {
         let s = Int(seconds.rounded())
         return String(format: "%d:%02d", s / 60, s % 60)
     }

@@ -1,0 +1,296 @@
+import AppKit
+
+/// The tools Pubbles offers agents over MCP, and the instructions that teach them the flow.
+@MainActor
+final class AgentTools {
+    private let takes: TakeController
+    /// The connected agent's name (from MCP initialize), recorded as a script's author.
+    var clientName = "Agent"
+
+    init(takes: TakeController) {
+        self.takes = takes
+    }
+
+    private var stage: Stage { takes.stage }
+    private var config: AgentsConfig { ConfigManager.shared.config.agents }
+    private var charLimit: Int { ConfigManager.shared.config.behavior.charLimit }
+
+    // MARK: Instructions
+
+    var instructions: String {
+        """
+        Pubbles makes short explainer videos of web pages: a pointer with subtitle bubbles and doodles, played on \
+        Pubbles' own browser window (the stage) and recorded. The user's mouse and keyboard are never used.
+
+        Flow:
+        1. open_page(url), then outline(), screenshot() and scroll_to() to learn the page. outline() targets work as-is.
+        2. Propose the storyboard in chat as a numbered scene list (what the bubble says, what gets pointed at or \
+        doodled, rough timing). Iterate with the user until they agree. Don't save before that.
+        3. validate_script(script) and fix every problem it reports.
+        4. save_script(id, script). Each save is a new version (v1, v2…); pass replace: true only if the user asked \
+        to overwrite. It then shows in Pubbles' menubar under Scripts.
+        5. rehearse(id) (if the user allows it) to check it plays; fix, save and rehearse again if a scene fails.
+        6. Recording: the user presses Record in Pubbles, or asks you to and record(id) is allowed. You get the \
+        video path back. Changes later: get_script, edit, save_script (new version).
+
+        Script: {"format":1, "name", "url", "viewport":[1440,900], "scenes":[{"title", "steps":[...]}]}. Steps, by "do":
+        - point {target, anchor?: center|left|right|above|below, offset?: [dx,dy]}: glide the pointer there
+        - say {text}: bubble on, then type it. "\\n" starts a new line; each line at most \(charLimit) characters
+        - newline, clear: in the bubble. pin: leave the bubble pinned at the pointer (needs text)
+        - hide: bubble off, pins stay. dismiss: bubble and pins off
+        - circle {target, pad?}, underline {target}, arrow {target, from?: [dx,dy]}: doodles (the bubble comes on)
+        - scroll {target, align?: 0–1, where its top lands in the viewport} or {by: pixels}
+        - click {target}, type {text}, key {key: escape|return|space|tab|pageup|pagedown|up|down}: act on the page
+        - wait {seconds}
+        Optional "duration" on point/click/circle/underline/arrow/scroll sets its speed in seconds.
+        Targets: a CSS selector or "text:Some words" (innermost visible element containing them).
+
+        Rules: doodles and pins stay fixed on the screen, not the page. Doodles are cleared before each scroll \
+        automatically; dismiss pins before scrolling. Give each bubble time to be read (a wait of about 1s per 4–5 \
+        words). Keep videos short, one idea per scene, and keep the pointer near what the bubble talks about.
+        """
+    }
+
+    // MARK: Definitions
+
+    private static let stepSchema: [String: Any] = [
+        "type": "object",
+        "required": ["do"],
+        "properties": [
+            "do": ["type": "string", "enum": ScriptValidator.actions.sorted()],
+            "target": ["type": "string", "description": "CSS selector or \"text:Some words\""],
+            "anchor": ["type": "string", "enum": ["center", "left", "right", "above", "below"]],
+            "offset": ["type": "array", "items": ["type": "number"], "minItems": 2, "maxItems": 2],
+            "text": ["type": "string"],
+            "key": ["type": "string", "enum": ScriptValidator.keys.sorted()],
+            "by": ["type": "number", "description": "scroll pixels, positive = down"],
+            "align": ["type": "number", "description": "scroll: where the target's top lands, 0–1 of the viewport height"],
+            "from": ["type": "array", "items": ["type": "number"], "minItems": 2, "maxItems": 2,
+                     "description": "arrow start relative to its tip"],
+            "pad": ["type": "number"],
+            "duration": ["type": "number", "description": "seconds"],
+            "seconds": ["type": "number", "description": "wait length"],
+        ],
+    ]
+
+    private static let scriptSchema: [String: Any] = [
+        "type": "object",
+        "required": ["name", "url", "scenes"],
+        "properties": [
+            "format": ["type": "integer", "enum": [1]],
+            "name": ["type": "string", "description": "shown to the user, e.g. \"pubbles.app tour\""],
+            "url": ["type": "string"],
+            "viewport": ["type": "array", "items": ["type": "number"], "minItems": 2, "maxItems": 2,
+                         "description": "[width, height] of the page in the video; default [1440, 900]"],
+            "scenes": ["type": "array", "items": [
+                "type": "object",
+                "required": ["title", "steps"],
+                "properties": ["title": ["type": "string"], "steps": ["type": "array", "items": stepSchema]],
+            ]],
+        ],
+    ]
+
+    private static func tool(_ name: String, _ description: String, _ properties: [String: Any] = [:],
+                             required: [String] = []) -> [String: Any] {
+        ["name": name, "description": description,
+         "inputSchema": ["type": "object", "properties": properties, "required": required]]
+    }
+
+    var definitions: [[String: Any]] {
+        let idVersion: [String: Any] = ["id": ["type": "string"], "version": ["type": "integer", "description": "default: latest"]]
+        return [
+            Self.tool("open_page", "Open a URL in Pubbles' stage window (a separate browser window sized for the video) and load it fresh.",
+                      ["url": ["type": "string"], "width": ["type": "number"], "height": ["type": "number"]], required: ["url"]),
+            Self.tool("outline", "Headings, buttons, links, images and fields on the stage page, with a target to use in scripts, their position on the page (pageY) and whether they're in view.",
+                      ["limit": ["type": "integer"]]),
+            Self.tool("screenshot", "Screenshot of the stage page's current view."),
+            Self.tool("scroll_to", "Scroll the stage page instantly (for looking around) to a target or a y position.",
+                      ["target": ["type": "string"], "y": ["type": "number"]]),
+            Self.tool("validate_script", "Check a script: structure, bubble rules, line length, and (check_page, default true) that every target is on the page where the take will need it. Returns problems to fix and an estimated length.",
+                      ["script": Self.scriptSchema, "check_page": ["type": "boolean"]], required: ["script"]),
+            Self.tool("save_script", "Validate and save a script into Pubbles as a new version (v1, v2…), or over the latest version with replace. It then appears in Pubbles under Scripts.",
+                      ["id": ["type": "string", "description": "lowercase-with-dashes, e.g. \"pubbles-app-tour\""],
+                       "script": Self.scriptSchema, "replace": ["type": "boolean"]], required: ["id", "script"]),
+            Self.tool("list_scripts", "Scripts saved in Pubbles, with their versions."),
+            Self.tool("get_script", "A saved script's JSON.", idVersion, required: ["id"]),
+            Self.tool("rehearse", "Play a saved script on the stage without recording, and wait for it to end. Returns whether it finished, and which scene and step failed if not. Only if the user allows agents to rehearse.",
+                      idVersion, required: ["id"]),
+            Self.tool("record", "Record a saved script (3-2-1 countdown, then the take) and wait for it to end. Returns the video path. Only when the user asks you to record and allows agents to record.",
+                      idVersion, required: ["id"]),
+            Self.tool("stop_take", "Stop the take that's playing."),
+            Self.tool("take_status", "Whether a take is playing (and which scene), and how the last one ended."),
+        ]
+    }
+
+    // MARK: Calls
+
+    func call(_ name: String, _ args: [String: Any]) async -> [String: Any] {
+        do {
+            switch name {
+            case "open_page": return try await openPage(args)
+            case "outline": return text(json(try await requireStage().outline(limit: args["limit"] as? Int ?? 150)))
+            case "screenshot":
+                let jpeg = try await requireStage().screenshot()
+                return ["content": [["type": "image", "data": jpeg.base64EncodedString(), "mimeType": "image/jpeg"]]]
+            case "scroll_to": return try await scrollTo(args)
+            case "validate_script": return try await validate(args)
+            case "save_script": return try await save(args)
+            case "list_scripts":
+                return text(json(ScriptStore.list().map { ["id": $0.id, "name": $0.name, "versions": $0.versions] }))
+            case "get_script": return try getScript(args)
+            case "rehearse": return try await runTake(args, kind: .rehearsal)
+            case "record": return try await runTake(args, kind: .recording)
+            case "stop_take":
+                takes.stop()
+                return text(takes.isRunning ? "Stopping the take." : "No take is playing.")
+            case "take_status":
+                var status: [String: Any] = ["playing": takes.isRunning]
+                if let scene = takes.sceneLabel { status["scene"] = scene }
+                if let last = takes.lastResult { status["last"] = last }
+                return text(json(status))
+            default:
+                return failure("Unknown tool \(name)")
+            }
+        } catch {
+            return failure(error.localizedDescription)
+        }
+    }
+
+    private func openPage(_ args: [String: Any]) async throws -> [String: Any] {
+        try requireIdle()
+        guard let url = args["url"] as? String, URL(string: url)?.scheme?.hasPrefix("http") == true else {
+            throw TakeError.script("url must be an http(s) URL")
+        }
+        let size = CGSize(width: (args["width"] as? NSNumber)?.doubleValue ?? 1440,
+                          height: (args["height"] as? NSNumber)?.doubleValue ?? 900)
+        try await stage.open(url: url, viewport: size)
+        return text("Stage open at \(url), viewport \(Int(size.width))×\(Int(size.height)). Use outline() and screenshot() to look around.")
+    }
+
+    private func scrollTo(_ args: [String: Any]) async throws -> [String: Any] {
+        let stage = try await requireStage()
+        if let target = args["target"] as? String {
+            guard let r = try await stage.viewportRect(target) else { throw TakeError.target(target) }
+            try await stage.jumpScroll(to: try await stage.scrollY() + Double(r.minY) - 0.15 * Double(stage.viewport.height))
+        } else if let y = (args["y"] as? NSNumber)?.doubleValue {
+            try await stage.jumpScroll(to: y)
+        } else {
+            throw TakeError.script("pass a target or y")
+        }
+        return text("Scrolled to y=\(Int(try await stage.scrollY())).")
+    }
+
+    private func validate(_ args: [String: Any]) async throws -> [String: Any] {
+        let script = try decodeScript(args["script"])
+        let validator = ScriptValidator(charLimit: charLimit)
+        let report: ScriptValidator.Report
+        if args["check_page"] as? Bool ?? true {
+            try requireIdle()
+            report = try await validator.check(script, on: stage)
+        } else {
+            report = validator.check(script)
+        }
+        return text(describe(report, script))
+    }
+
+    private func save(_ args: [String: Any]) async throws -> [String: Any] {
+        try requireIdle()
+        guard let id = args["id"] as? String else { throw TakeError.script("id is required") }
+        var script = try decodeScript(args["script"])
+        let report = try await ScriptValidator(charLimit: charLimit).check(script, on: stage)
+        guard report.problems.isEmpty else {
+            return failure("Not saved. Fix these first:\n" + describe(report, script))
+        }
+        script.author = TakeScript.Author(agent: clientName, updated: ISO8601DateFormatter().string(from: Date()))
+        let version = try ScriptStore.save(script, id: id, replace: args["replace"] as? Bool ?? false)
+        return text("Saved \"\(script.name)\" as \(id) v\(version) (\(script.scenes.count) scenes, about \(TakeController.clock(report.estimatedSeconds))). The user can find it in Pubbles' menubar under Scripts.")
+    }
+
+    private func getScript(_ args: [String: Any]) throws -> [String: Any] {
+        let (id, version) = try scriptRef(args)
+        let data = try Data(contentsOf: ScriptStore.fileURL(id: id, version: version))
+        return text("\(id) v\(version):\n" + String(decoding: data, as: UTF8.self))
+    }
+
+    private func runTake(_ args: [String: Any], kind: TakeController.Kind) async throws -> [String: Any] {
+        switch kind {
+        case .rehearsal where !config.allowRehearse:
+            throw TakeError.setup("The user hasn't allowed agents to rehearse. Ask them to press Rehearse in Pubbles (menubar → Scripts).")
+        case .recording where !config.allowRecord:
+            throw TakeError.setup("The user hasn't allowed agents to record. Ask them to press Record in Pubbles (menubar → Scripts), or to allow it there.")
+        default: break
+        }
+        try requireIdle()
+        let (id, version) = try scriptRef(args)
+        takes.start(id: id, version: version, kind: kind)
+        guard let result = await takes.waitForEnd() else { throw TakeError.setup("The take didn't start") }
+        var out: [String: Any] = ["finished": result.finished, "stopped": result.stopped,
+                                  "length": TakeController.clock(result.seconds), "script": "\(id) v\(version)"]
+        if let error = result.error { out["error"] = error }
+        if let file = result.file { out["video"] = file }
+        if result.stopped { out["note"] = "The user stopped it (Esc or Stop)." }
+        return result.finished ? text(json(out)) : failure(json(out))
+    }
+
+    // MARK: Helpers
+
+    private func requireIdle() throws {
+        if takes.isRunning { throw TakeError.setup("A take is playing on the stage; wait for it or stop_take() first") }
+    }
+
+    private func requireStage() async throws -> Stage {
+        try requireIdle()
+        guard stage.isOpen else { throw TakeError.setup("The stage isn't open; call open_page(url) first") }
+        return stage
+    }
+
+    private func scriptRef(_ args: [String: Any]) throws -> (String, Int) {
+        guard let id = args["id"] as? String, let entry = ScriptStore.list().first(where: { $0.id == id }) else {
+            throw TakeError.script("No script with that id; list_scripts() shows what's saved")
+        }
+        let version = (args["version"] as? NSNumber)?.intValue ?? entry.latest
+        guard entry.versions.contains(version) else {
+            throw TakeError.script("\(id) has versions \(entry.versions.map { "v\($0)" }.joined(separator: ", "))")
+        }
+        return (id, version)
+    }
+
+    private func decodeScript(_ value: Any?) throws -> TakeScript {
+        guard var dict = value as? [String: Any] else { throw TakeError.script("script must be an object") }
+        if dict["format"] == nil { dict["format"] = 1 }
+        let data = try JSONSerialization.data(withJSONObject: dict)
+        do {
+            return try JSONDecoder().decode(TakeScript.self, from: data)
+        } catch let error as DecodingError {
+            throw TakeError.script("script doesn't match the format: \(Self.describe(error))")
+        }
+    }
+
+    private static func describe(_ error: DecodingError) -> String {
+        func path(_ keys: [CodingKey]) -> String {
+            keys.map { $0.intValue.map { "[\($0)]" } ?? ".\($0.stringValue)" }.joined()
+        }
+        switch error {
+        case .keyNotFound(let key, let ctx): return "missing \"\(key.stringValue)\" at script\(path(ctx.codingPath))"
+        case .typeMismatch(_, let ctx), .valueNotFound(_, let ctx), .dataCorrupted(let ctx):
+            return "wrong type at script\(path(ctx.codingPath))"
+        @unknown default: return "\(error)"
+        }
+    }
+
+    private func describe(_ report: ScriptValidator.Report, _ script: TakeScript) -> String {
+        let head = "\(script.scenes.count) scenes, \(report.steps) steps, about \(TakeController.clock(report.estimatedSeconds))."
+        guard !report.problems.isEmpty else { return "OK. " + head }
+        return head + "\nProblems:\n" + report.problems.map { "- " + $0 }.joined(separator: "\n")
+    }
+
+    private func json(_ value: Any) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else {
+            return "\(value)"
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func text(_ s: String) -> [String: Any] { ["content": [["type": "text", "text": s]]] }
+    private func failure(_ s: String) -> [String: Any] { ["content": [["type": "text", "text": s]], "isError": true] }
+}
