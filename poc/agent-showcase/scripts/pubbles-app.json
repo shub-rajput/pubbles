@@ -1,0 +1,64 @@
+{
+  "url": "https://pubbles.app/",
+  "viewport": [1440, 900],
+  "steps": [
+    { "do": "wait", "seconds": 0.6 },
+
+    { "do": "point", "target": ".hero-title-img", "anchor": "below", "offset": [-140, 6] },
+    { "do": "say", "text": "hi! this is pubbles.app\nlet me show you around" },
+    { "do": "wait", "seconds": 1.2 },
+    { "do": "clear" },
+    { "do": "circle", "target": ".hero-title-img", "pad": 18, "duration": 1.0 },
+    { "do": "say", "text": "subtitles for your pointer" },
+    { "do": "wait", "seconds": 1.2 },
+
+    { "do": "hide" },
+    { "do": "click", "target": "#pubble-demo-btn" },
+    { "do": "wait", "seconds": 0.5 },
+    { "do": "type", "text": "this one is the web demo" },
+    { "do": "wait", "seconds": 1.2 },
+    { "do": "key", "key": "escape" },
+
+    { "do": "click", "target": "#download-btn" },
+    { "do": "wait", "seconds": 0.7 },
+    { "do": "point", "target": "#modal-title", "anchor": "right" },
+    { "do": "say", "text": "install steps live here" },
+    { "do": "underline", "target": ".brew-code" },
+    { "do": "wait", "seconds": 1.2 },
+    { "do": "hide" },
+    { "do": "key", "key": "escape" },
+    { "do": "wait", "seconds": 0.4 },
+
+    { "do": "scroll", "target": "text:Text bubbles that follow your cursor", "align": 0.22 },
+    { "do": "point", "target": "text:Text bubbles that follow your cursor", "anchor": "below", "offset": [-120, 30] },
+    { "do": "underline", "target": "text:Text bubbles that follow your cursor" },
+    { "do": "say", "text": "type, and it follows you" },
+    { "do": "wait", "seconds": 1.0 },
+    { "do": "newline" },
+    { "do": "say", "text": "scrolling works with it on" },
+    { "do": "scroll", "target": "text:Annotate anything on screen!", "align": 0.22 },
+    { "do": "clear" },
+
+    { "do": "arrow", "target": "img[alt='Annotate anything on screen']", "anchor": "left", "from": [-190, -70] },
+    { "do": "say", "text": "doodle right on the page" },
+    { "do": "wait", "seconds": 1.2 },
+    { "do": "hide" },
+
+    { "do": "scroll", "target": "text:Add pointers that stick around", "align": 0.22 },
+    { "do": "point", "target": "text:Add pointers that stick around", "anchor": "above", "offset": [-80, -6] },
+    { "do": "say", "text": "pin a bubble in place" },
+    { "do": "pin" },
+    { "do": "point", "target": "img[alt^='Pin Pubbles']", "offset": [-60, 40] },
+    { "do": "say", "text": "and it sticks around" },
+    { "do": "pin" },
+    { "do": "hide" },
+    { "do": "wait", "seconds": 1.4 },
+    { "do": "dismiss" },
+
+    { "do": "scroll", "target": ".hero-section", "align": 0 },
+    { "do": "point", "target": "#download-btn", "anchor": "below", "offset": [0, 24] },
+    { "do": "say", "text": "this tour was run by an agent\nget pubbles free for mac" },
+    { "do": "wait", "seconds": 2.0 },
+    { "do": "dismiss" }
+  ]
+}

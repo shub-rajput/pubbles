@@ -13,11 +13,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsWindowController: SettingsWindowController!
     private var speechManager: SpeechManager!
     private var dictationCancellable: AnyCancellable?
+    private var agentControl: AgentControl!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         overlayController = OverlayController(viewModel: viewModel)
         eventManager = EventManager(viewModel: viewModel)
         cursorTracker = CursorTracker(viewModel: viewModel)
+        agentControl = AgentControl(viewModel: viewModel)
 
         wiggleDetector = WiggleDetector(viewModel: viewModel)
         wiggleDetector.onWiggle = { [weak self] in
