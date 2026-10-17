@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 
 /// Lets local scripts and agents drive Pubbles directly instead of faking its hotkeys
 /// (proof of concept for "Pubbles for agents", see docs/ideas/2026-10-12-pubbles-for-agents.md).
@@ -13,6 +12,11 @@ final class AgentControl: NSObject {
     static let stateName = Notification.Name("app.pubbles.agent.state")
 
     private let viewModel: SubtitleViewModel
+    /// Start a take: script id, version, record (vs rehearse). Set by the app delegate.
+    var onTake: ((String, Int, Bool) -> Void)?
+    var onStopTake: (() -> Void)?
+    /// Running take / last result, included in every state reply.
+    var takeStatus: (() -> [String: Any])?
 
     init(viewModel: SubtitleViewModel) {
         self.viewModel = viewModel
@@ -44,27 +48,24 @@ final class AgentControl: NSObject {
             viewModel.pinCurrentPill()
         case "ghost":
             // Move the ghost pointer (and with it the bubble) without touching the real mouse.
-            guard let p = localPoint(info) else { break }
-            viewModel.ghostCursorActive = true
-            moveGhost(to: p)
+            if let p = globalPoint(info) { viewModel.moveGhost(to: p) }
         case "ghostOff":
-            viewModel.ghostCursorActive = false
+            viewModel.hideGhost()
         case "strokeBegin":
-            // Ghost doodles go straight into the stroke list, so the overlay never has to take the
-            // real mouse (no drawing mode, nothing blocked for the user).
-            guard viewModel.isActive, let p = localPoint(info) else { break }
-            moveGhost(to: p)
-            viewModel.currentStroke = [p.point]
-            viewModel.isDrawing = true
+            if let p = globalPoint(info) { viewModel.ghostStrokeBegin(at: p) }
         case "strokeTo":
-            guard !viewModel.currentStroke.isEmpty, let p = localPoint(info) else { break }
-            moveGhost(to: p)
-            viewModel.currentStroke.append(p.point)
+            if let p = globalPoint(info) { viewModel.ghostStrokeTo(p) }
         case "strokeEnd":
             viewModel.endStroke()
         case "clearStrokes":
-            // Doodles are screen-anchored, so callers clear them before scrolling the content away
-            withAnimation(.easeOut(duration: 0.25)) { viewModel.clearStrokes() }
+            viewModel.clearStrokesAnimated()
+        case "take":
+            if let id = info["id"] as? String {
+                let version = (info["version"] as? NSNumber)?.intValue ?? ScriptStore.list().first { $0.id == id }?.latest ?? 1
+                onTake?(id, version, info["record"] as? Bool ?? false)
+            }
+        case "stopTake":
+            onStopTake?()
         case "draw":
             // Same as holding the drawing modifier: while on (and the bubble is active), the overlay
             // takes left-drags as strokes.
@@ -82,25 +83,15 @@ final class AgentControl: NSObject {
             "strokes": viewModel.strokes.count,
         ]
         if let seq = info["seq"] { state["seq"] = seq }
+        if let take = takeStatus?() { state["take"] = take }
         DistributedNotificationCenter.default().postNotificationName(
             Self.stateName, object: nil, userInfo: state, deliverImmediately: true
         )
     }
 
-    /// `x`/`y` in global CoreGraphics coordinates (top-left of the main display) → the screen they
-    /// fall on and a point local to it, matching what CursorTracker produces for the real mouse.
-    private func localPoint(_ info: [AnyHashable: Any]) -> (point: NSPoint, screen: NSScreen)? {
-        guard let x = (info["x"] as? NSNumber)?.doubleValue, let y = (info["y"] as? NSNumber)?.doubleValue,
-              let primary = NSScreen.screens.first else { return nil }
-        let global = NSPoint(x: x, y: primary.frame.height - y)
-        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(global, $0.frame, false) }) ?? NSScreen.main else { return nil }
-        let local = NSPoint(x: global.x - screen.frame.origin.x, y: screen.frame.height - (global.y - screen.frame.origin.y))
-        return (local, screen)
-    }
-
-    private func moveGhost(to p: (point: NSPoint, screen: NSScreen)) {
-        if viewModel.cursorPosition != p.point { viewModel.cursorPosition = p.point }
-        let id = ObjectIdentifier(p.screen)
-        if viewModel.activeScreenID != id { viewModel.activeScreenID = id }
+    /// `x`/`y` in global CoreGraphics coordinates (top-left of the main display).
+    private func globalPoint(_ info: [AnyHashable: Any]) -> CGPoint? {
+        guard let x = (info["x"] as? NSNumber)?.doubleValue, let y = (info["y"] as? NSNumber)?.doubleValue else { return nil }
+        return CGPoint(x: x, y: y)
     }
 }

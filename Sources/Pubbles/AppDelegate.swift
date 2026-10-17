@@ -14,12 +14,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var speechManager: SpeechManager!
     private var dictationCancellable: AnyCancellable?
     private var agentControl: AgentControl!
+    private var takeController: TakeController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         overlayController = OverlayController(viewModel: viewModel)
         eventManager = EventManager(viewModel: viewModel)
         cursorTracker = CursorTracker(viewModel: viewModel)
         agentControl = AgentControl(viewModel: viewModel)
+        takeController = TakeController(viewModel: viewModel)
+        takeController.onChange = { [weak self] in self?.updateTakeStatus() }
+        agentControl.onTake = { [weak self] id, version, record in
+            self?.takeController.start(id: id, version: version, kind: record ? .recording : .rehearsal)
+        }
+        agentControl.onStopTake = { [weak self] in self?.takeController.stop() }
+        agentControl.takeStatus = { [weak self] in
+            guard let take = self?.takeController else { return [:] }
+            var status: [String: Any] = ["running": take.isRunning]
+            if let scene = take.sceneLabel { status["scene"] = scene }
+            if let last = take.lastResult { status["last"] = last }
+            return status
+        }
 
         wiggleDetector = WiggleDetector(viewModel: viewModel)
         wiggleDetector.onWiggle = { [weak self] in
@@ -78,6 +92,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         eventManager.onPermissionMissing = { [weak self] in
             self?.settingsWindowController.showWindow()
         }
+        eventManager.onTakeEscape = { [weak self] in
+            self?.takeController.stop()
+        }
         eventManager.start()
         cursorTracker.start()
         wiggleDetector.start()
@@ -116,6 +133,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         themeItem.image = NSImage(systemSymbolName: "paintpalette", accessibilityDescription: nil)
         themeItem.submenu = buildThemeMenu()
         menu.addItem(themeItem)
+
+        let scriptsItem = NSMenuItem(title: "Scripts", action: nil, keyEquivalent: "")
+        scriptsItem.image = NSImage(systemSymbolName: "play.rectangle", accessibilityDescription: nil)
+        scriptsItem.submenu = buildScriptsMenu()
+        menu.addItem(scriptsItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -174,6 +196,79 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let themeItem = menu.items.first(where: { $0.title == "Theme" }) {
             themeItem.submenu = buildThemeMenu()
         }
+        if let scriptsItem = menu.items.first(where: { $0.title == "Scripts" }) {
+            scriptsItem.submenu = buildScriptsMenu()
+        }
+    }
+
+    // MARK: Scripts (temporary home until the Agents tab exists)
+
+    private func buildScriptsMenu() -> NSMenu {
+        let submenu = NSMenu()
+        if takeController.isRunning {
+            let label = takeController.kind == .recording ? "Recording" : "Rehearsing"
+            submenu.addItem(NSMenuItem(title: "\(label) · \(takeController.sceneLabel ?? "")", action: nil, keyEquivalent: ""))
+            submenu.addItem(NSMenuItem(title: "Stop Take (esc)", action: #selector(stopTake), keyEquivalent: ""))
+            return submenu
+        }
+        let scripts = ScriptStore.list()
+        if scripts.isEmpty {
+            submenu.addItem(NSMenuItem(title: "No scripts yet", action: nil, keyEquivalent: ""))
+        }
+        for script in scripts {
+            let item = NSMenuItem(title: "\(script.name) (v\(script.latest))", action: nil, keyEquivalent: "")
+            let actions = NSMenu()
+            for (title, kind) in [("Rehearse", "rehearse"), ("Record", "record")] {
+                let action = NSMenuItem(title: title, action: #selector(runTake(_:)), keyEquivalent: "")
+                action.representedObject = [script.id, String(script.latest), kind]
+                actions.addItem(action)
+            }
+            item.submenu = actions
+            submenu.addItem(item)
+        }
+        if let last = takeController.lastResult {
+            submenu.addItem(NSMenuItem.separator())
+            let item = NSMenuItem(title: "Last take: \(last)", action: nil, keyEquivalent: "")
+            item.toolTip = last
+            submenu.addItem(item)
+        }
+        submenu.addItem(NSMenuItem.separator())
+        submenu.addItem(NSMenuItem(title: "Open Recordings Folder", action: #selector(openRecordingsFolder), keyEquivalent: ""))
+        submenu.addItem(NSMenuItem(title: "Open Scripts Folder", action: #selector(openScriptsFolder), keyEquivalent: ""))
+        return submenu
+    }
+
+    @objc private func runTake(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [String], info.count == 3, let version = Int(info[1]) else { return }
+        takeController.start(id: info[0], version: version, kind: info[2] == "record" ? .recording : .rehearsal)
+    }
+
+    @objc private func stopTake() {
+        takeController.stop()
+    }
+
+    /// Menubar shows REC / ▶ while a take runs.
+    private func updateTakeStatus() {
+        guard let button = statusItem.button else { return }
+        if takeController.isRunning {
+            statusItem.length = NSStatusItem.variableLength
+            button.imagePosition = .imageLeading
+            button.title = takeController.kind == .recording ? " REC" : " Rehearsing"
+        } else {
+            button.title = ""
+            button.imagePosition = .imageOnly
+            statusItem.length = NSStatusItem.squareLength
+        }
+    }
+
+    @objc private func openRecordingsFolder() {
+        try? FileManager.default.createDirectory(at: TakeController.recordingsFolder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(TakeController.recordingsFolder)
+    }
+
+    @objc private func openScriptsFolder() {
+        try? FileManager.default.createDirectory(at: ScriptStore.folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(ScriptStore.folder)
     }
 
     @objc private func openThemesFolder() {
@@ -201,7 +296,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func handleWiggle() {
         let behavior = ConfigManager.shared.config.behavior
-        guard behavior.wiggleEnabled else { return }
+        guard behavior.wiggleEnabled, !viewModel.takeInProgress else { return }
         switch behavior.wiggleToActivate {
         case "pubble":
             viewModel.drawingModeEnabled = false

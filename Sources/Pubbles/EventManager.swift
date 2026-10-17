@@ -14,6 +14,8 @@ final class EventManager {
     }
 
     var onPermissionMissing: (() -> Void)?
+    /// Esc pressed while a scripted take is playing.
+    var onTakeEscape: (() -> Void)?
 
     func start() {
         if !AXIsProcessTrusted() {
@@ -93,6 +95,18 @@ final class EventManager {
                         self.handlePermissionLost()
                     }
                 }
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        // During a scripted take the bubble belongs to the agent: leave the user's input alone,
+        // except Esc, which stops the take.
+        if MainActor.assumeIsolated({ self.viewModel.takeInProgress }) {
+            if type == .keyDown && event.getIntegerValueField(.keyboardEventKeycode) == 53 {
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self.onTakeEscape?() }
+                }
+                return nil
             }
             return Unmanaged.passUnretained(event)
         }

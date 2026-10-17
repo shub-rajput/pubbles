@@ -45,6 +45,9 @@ class SubtitleViewModel: ObservableObject {
     /// An agent is steering a ghost pointer: `cursorPosition` follows it instead of the real mouse,
     /// and the overlay draws the pointer itself (see AgentControl).
     @Published var ghostCursorActive: Bool = false
+    /// A scripted take is playing: the bubble belongs to the agent, so the user's keys, clicks and
+    /// wiggles pass through untouched (except Esc, which stops the take).
+    var takeInProgress: Bool = false
 
     @Published var dictationModeEnabled: Bool = false
     /// Live mic input level (0...1) driving the recording badge pulse. Reset to 0 when not listening.
