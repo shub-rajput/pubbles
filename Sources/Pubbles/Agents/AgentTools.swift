@@ -4,11 +4,13 @@ import AppKit
 @MainActor
 final class AgentTools {
     private let takes: TakeController
+    private let live: LivePresenter
     /// The connected agent's name (from MCP initialize), recorded as a script's author.
     var clientName = "Agent"
 
-    init(takes: TakeController) {
+    init(takes: TakeController, live: LivePresenter) {
         self.takes = takes
+        self.live = live
     }
 
     private var stage: Stage { takes.stage }
@@ -57,6 +59,14 @@ final class AgentTools {
         Every take (menubar or tool) opens a fresh stage window in front, centred, and checks it's visible; if it \
         can't, the take doesn't start and the result has a code (stage_not_visible, stage_occluded, \
         viewport_too_large, permission_missing:screen_recording). Results include a "stage" block.
+
+        Live mode (any app, nothing recorded): to point at and explain things anywhere on screen while you \
+        work with the user. Start with live_focus(app, title?) so the window you're talking about is in front \
+        (it returns that window's frame); or pass app on any live action. Then live_point, live_say, \
+        live_circle, live_underline, live_arrow, live_pin, live_clear, live_hide_bubble, and live_end when done. Positions are screen points from the top-left \
+        of the main display (the space macOS Accessibility frames use), so find them with a computer-use or \
+        accessibility tool first. The pointer starts where the user's mouse is; give the user time to read \
+        each bubble. Live mode ends after a minute without calls, on Esc, or when a take starts.
 
         Rules: doodles and pins stay fixed on the screen, not the page. Doodles are cleared before each scroll \
         automatically; dismiss pins before scrolling. Give each bubble time to be read (a wait of about 1s per 4–5 \
@@ -111,6 +121,11 @@ final class AgentTools {
 
     var definitions: [[String: Any]] {
         let idVersion: [String: Any] = ["id": ["type": "string"], "version": ["type": "integer", "description": "default: latest"]]
+        let num: [String: Any] = ["type": "number"]
+        let target: [String: Any] = ["app": ["type": "string", "description": "bring this app's window to the front first (name or bundle id)"],
+                                     "title": ["type": "string", "description": "which of its windows (title contains)"]]
+        func live(_ props: [String: Any]) -> [String: Any] { props.merging(target) { a, _ in a } }
+        let rect = live(["x": num, "y": num, "width": num, "height": num, "duration": num])
         return [
             Self.tool("open_page", "Open a URL in Pubbles' stage window (a separate browser window sized for the video) and load it fresh.",
                       ["url": ["type": "string"], "width": ["type": "number"], "height": ["type": "number"]], required: ["url"]),
@@ -135,6 +150,20 @@ final class AgentTools {
             Self.tool("prepare_stage", "Open a fresh stage window for a saved script, in front and centred, and report whether it's visible. Doesn't play anything; use it to let the user look before a take.",
                       idVersion, required: ["id"]),
             Self.tool("stop_take", "Stop the take that's playing."),
+            Self.tool("live_focus", "Live mode: bring an app's window to the front (launching the app if needed) and check it's visible, so the user sees what you point at. Returns the window's frame in screen points.",
+                      target, required: ["app"]),
+            Self.tool("live_point", "Live mode: glide Pubbles' pointer to a screen position (points, top-left of the main display).",
+                      live(["x": num, "y": num, "duration": num]), required: ["x", "y"]),
+            Self.tool("live_say", "Live mode: show a new message in the bubble at the pointer (replaces the previous one). Optionally glide to x, y first. \"\\n\" starts a new line; lines up to \(charLimit) characters.",
+                      live(["text": ["type": "string"], "x": num, "y": num]), required: ["text"]),
+            Self.tool("live_circle", "Live mode: doodle a loose circle around a screen rect.", rect, required: ["x", "y", "width", "height"]),
+            Self.tool("live_underline", "Live mode: doodle an underline under a screen rect.", rect, required: ["x", "y", "width", "height"]),
+            Self.tool("live_arrow", "Live mode: doodle an arrow pointing at x, y (from from_x, from_y, default up-left of it).",
+                      live(["x": num, "y": num, "from_x": num, "from_y": num]), required: ["x", "y"]),
+            Self.tool("live_pin", "Live mode: leave the current bubble pinned where it is."),
+            Self.tool("live_clear", "Live mode: clear the bubble's text and the doodles (pins stay)."),
+            Self.tool("live_hide_bubble", "Live mode: hide the bubble (pins and the pointer stay)."),
+            Self.tool("live_end", "Live mode: remove the pointer, bubble, pins and doodles."),
             Self.tool("take_status", "Whether a take is playing (and which scene), and how the last one ended."),
         ]
     }
@@ -159,6 +188,16 @@ final class AgentTools {
             case "preview_scene": return try await runTake(args, kind: .preview)
             case "prepare_stage": return try await prepareStage(args)
             case "record": return try await runTake(args, kind: .recording)
+            case "live_focus":
+                guard let app = args["app"] as? String else { throw TakeError.script("app is required") }
+                try requireIdle()
+                return text(json(try await live.focus(app: app, title: args["title"] as? String).report))
+            case "live_point", "live_say", "live_circle", "live_underline", "live_arrow",
+                 "live_pin", "live_clear", "live_hide_bubble":
+                return try await liveCall(name, args)
+            case "live_end":
+                live.end()
+                return text("Live mode ended.")
             case "stop_take":
                 takes.stop()
                 return text(takes.isRunning ? "Stopping the take." : "No take is playing.")
@@ -242,6 +281,7 @@ final class AgentTools {
         }
         try requireIdle()
         let (id, version) = try scriptRef(args)
+        live.end()
         var through: Int?
         if kind == .preview {
             let count = try ScriptStore.load(id: id, version: version).scenes.count
@@ -271,10 +311,43 @@ final class AgentTools {
         return reply
     }
 
+    private func liveCall(_ name: String, _ args: [String: Any]) async throws -> [String: Any] {
+        try requireIdle()
+        func number(_ key: String) -> CGFloat? { (args[key] as? NSNumber).map { CGFloat($0.doubleValue) } }
+        func point() throws -> CGPoint {
+            guard let x = number("x"), let y = number("y") else { throw TakeError.script("x and y are required") }
+            return CGPoint(x: x, y: y)
+        }
+        func rect() throws -> CGRect {
+            guard let w = number("width"), let h = number("height") else { throw TakeError.script("x, y, width and height are required") }
+            return CGRect(origin: try point(), size: CGSize(width: w, height: h))
+        }
+        let duration = (args["duration"] as? NSNumber)?.doubleValue
+        if let app = args["app"] as? String {
+            try await live.focus(app: app, title: args["title"] as? String)
+        }
+        switch name {
+        case "live_point": try await live.point(at: try point(), duration: duration)
+        case "live_say":
+            guard let text = args["text"] as? String, !text.isEmpty else { throw TakeError.script("text is required") }
+            try await live.say(text, at: number("x") == nil ? nil : try point())
+        case "live_circle": try await live.circle(try rect(), duration: duration)
+        case "live_underline": try await live.underline(try rect(), duration: duration)
+        case "live_arrow":
+            let from = number("from_x").flatMap { fx in number("from_y").map { CGPoint(x: fx, y: $0) } }
+            try await live.arrow(to: try point(), from: from)
+        case "live_pin": try await live.pin()
+        case "live_clear": try await live.clear()
+        default: try await live.hideBubble()
+        }
+        return text("ok")
+    }
+
     private func prepareStage(_ args: [String: Any]) async throws -> [String: Any] {
         try requireIdle()
         let (id, version) = try scriptRef(args)
         let script = try ScriptStore.load(id: id, version: version)
+        live.end()
         try await stage.open(url: script.url, viewport: script.viewportSize, forTake: true)
         let state = stage.windowState().report
         return text(json(["script": "\(id) v\(version)", "stage": state,

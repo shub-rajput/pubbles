@@ -16,6 +16,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var agentControl: AgentControl!
     private var takeController: TakeController!
     private var mcpServer: MCPServer!
+    private var livePresenter: LivePresenter!
     private var agentsConfigCancellable: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -26,10 +27,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         takeController = TakeController(viewModel: viewModel)
         takeController.onChange = { [weak self] in self?.updateTakeStatus() }
         agentControl.onTake = { [weak self] id, version, record in
+            self?.livePresenter.end()
             self?.takeController.start(id: id, version: version, kind: record ? .recording : .rehearsal)
         }
         agentControl.onStopTake = { [weak self] in self?.takeController.stop() }
-        mcpServer = MCPServer(tools: AgentTools(takes: takeController))
+        livePresenter = LivePresenter(viewModel: viewModel)
+        mcpServer = MCPServer(tools: AgentTools(takes: takeController, live: livePresenter))
         // The MCP server only listens while agent access is on.
         agentsConfigCancellable = ConfigManager.shared.$config
             .map { $0.agents.enabled }
@@ -104,6 +107,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         eventManager.onTakeEscape = { [weak self] in
             self?.takeController.stop()
+            self?.livePresenter.end()
         }
         eventManager.start()
         cursorTracker.start()
@@ -325,6 +329,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func runTake(_ sender: NSMenuItem) {
         guard let info = sender.representedObject as? [String], info.count == 3, let version = Int(info[1]) else { return }
+        livePresenter.end()
         takeController.start(id: info[0], version: version, kind: info[2] == "record" ? .recording : .rehearsal)
     }
 

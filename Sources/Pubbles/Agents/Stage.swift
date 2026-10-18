@@ -204,24 +204,7 @@ final class Stage {
 
     // MARK: Window: bring forward, position, verify
 
-    /// What the stage window looks like on screen right now.
-    struct WindowState: Sendable {
-        var onScreen = false     // on the current Space, not minimised or hidden
-        var frontmost = false    // no normal window above it
-        var covered = 0.0        // fraction of it covered by other windows
-        var frame: CGRect?
-        var display: String?
-
-        var visible: Bool { onScreen && covered < 0.02 }
-
-        var report: [String: Any] {
-            var r: [String: Any] = ["visible": visible, "frontmost": frontmost, "onScreen": onScreen,
-                                    "coveredPercent": Int((covered * 100).rounded())]
-            if let f = frame { r["frame"] = [Int(f.minX), Int(f.minY), Int(f.width), Int(f.height)] }
-            if let display { r["display"] = display }
-            return r
-        }
-    }
+    typealias WindowState = WindowFocus.State
 
     /// Before a take: bring the stage forward (restoring it if minimised), fit and centre it, then
     /// check it really is visible. Throws a `.stage` error instead of playing into a hidden window.
@@ -248,55 +231,14 @@ final class Stage {
             "Another window covers \(Int((state.covered * 100).rounded()))% of the stage, so the take didn't start")
     }
 
-    /// Raise the stage over other apps. macOS ignores plain activation requests from a background
-    /// app, so this also goes through Accessibility (which Pubbles already has).
+    /// Raise the stage over other apps.
     func bringToFront() {
-        guard chromePID != 0, let app = NSRunningApplication(processIdentifier: chromePID) else { return }
-        NSApp.yieldActivation(to: app)
-        app.activate(options: [.activateAllWindows])
-        let ax = AXUIElementCreateApplication(chromePID)
-        AXUIElementSetAttributeValue(ax, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-        var value: CFTypeRef?
-        if AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute as CFString, &value) == .success,
-           let windows = value as? [AXUIElement] {
-            for window in windows {
-                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            }
-        }
+        WindowFocus.raise(pid: chromePID)
     }
 
-    /// From the window server's list of on-screen windows, front to back.
+    /// The stage window on screen right now (from the window server's front-to-back list).
     func windowState() -> WindowState {
-        var state = WindowState()
-        guard chromePID != 0,
-              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-            return state
-        }
-        func bounds(_ w: [String: Any]) -> CGRect? {
-            (w[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) }
-        }
-        func isNormal(_ w: [String: Any]) -> Bool {
-            (w[kCGWindowLayer as String] as? Int) == 0 && ((w[kCGWindowAlpha as String] as? Double) ?? 1) > 0.05
-        }
-        guard let index = list.firstIndex(where: {
-            ($0[kCGWindowOwnerPID as String] as? pid_t) == chromePID && isNormal($0) && (bounds($0)?.width ?? 0) > 200
-        }), let frame = bounds(list[index]) else { return state }
-
-        state.onScreen = true
-        state.frame = frame
-        // Normal windows in front of it. Pubbles' overlay sits on a higher layer, so it's not counted;
-        // Pubbles' Settings window is, if it's over the stage.
-        let above = list[..<index].filter(isNormal)
-        state.frontmost = above.isEmpty
-        let coveredArea = above.compactMap { bounds($0)?.intersection(frame) }.filter { !$0.isNull }
-            .reduce(0.0) { $0 + Double($1.width * $1.height) }
-        state.covered = min(1, coveredArea / Double(max(1, frame.width * frame.height)))
-        state.display = NSScreen.screens.first { screen in
-            let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
-            return id.map { CGDisplayBounds($0).contains(CGPoint(x: frame.midX, y: frame.midY)) } ?? false
-        }?.localizedName
-        return state
+        WindowFocus.state(pid: chromePID)
     }
 
     private func requirePage() throws -> DevTools {
