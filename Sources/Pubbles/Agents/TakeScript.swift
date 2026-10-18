@@ -1,12 +1,15 @@
 import Foundation
 
-/// A showcase script an agent hands to Pubbles: scenes of steps, played on the stage.
+/// A showcase script an agent hands to Pubbles: scenes of steps. A web script has a `url` and plays
+/// on the stage; an app script has `windows` (arranged by `layout`) and plays over those apps.
 /// Stored as `~/.config/pubbles/scripts/<id>/v<N>.json`, one file per version.
 struct TakeScript: Codable, Sendable {
     var format: Int = 1
     var name: String
-    var url: String
+    var url: String?
     var viewport: [Double]?
+    var windows: [WindowRef]?
+    var layout: String?
     var author: Author?
     var scenes: [Scene]
 
@@ -15,6 +18,22 @@ struct TakeScript: Codable, Sendable {
         var updated: String?
     }
 
+    struct WindowRef: Codable, Sendable {
+        var app: String       // name or bundle id
+        var title: String?    // window title contains
+    }
+
+    /// An element in a native app, found through Accessibility when its step plays.
+    struct ElementRef: Codable, Sendable {
+        var app: String
+        var title: String     // label the element shows (title, description or text), contains
+        var role: String?     // e.g. "button", "AXStaticText"
+        var window: String?   // window title contains
+        var index: Int?       // which match, default the first
+    }
+
+    var isAppScript: Bool { windows?.isEmpty == false }
+
     struct Scene: Codable, Sendable {
         var title: String
         var steps: [Step]
@@ -22,7 +41,8 @@ struct TakeScript: Codable, Sendable {
 
     struct Step: Codable, Sendable {
         var action: String
-        var target: String?   // CSS selector, or "text:Some words"
+        var target: String?   // web: CSS selector, or "text:Some words"
+        var element: ElementRef? // apps: an element found through Accessibility
         var anchor: String?   // center | left | right | above | below
         var offset: [Double]? // [dx, dy] added to the anchor point
         var text: String?
@@ -38,7 +58,7 @@ struct TakeScript: Codable, Sendable {
 
         enum CodingKeys: String, CodingKey {
             case action = "do"
-            case target, anchor, offset, text, key, by, align, from, pad, duration, seconds, optional
+            case target, element, anchor, offset, text, key, by, align, from, pad, duration, seconds, optional
         }
     }
 

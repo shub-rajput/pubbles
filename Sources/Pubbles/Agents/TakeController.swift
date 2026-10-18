@@ -80,6 +80,7 @@ final class TakeController {
     private func run(id: String, version: Int, kind: Kind, throughScene: Int? = nil) async {
         var recorder: StageRecorder?
         var stageGuard: Task<Void, Never>?
+        var movedWindows: [(AXUIElement, CGRect)] = []
         var result = Result(kind: kind.rawValue, script: id, version: version, finished: false, stopped: false, seconds: 0)
         var message: String
         abortReason = nil
@@ -87,12 +88,30 @@ final class TakeController {
             let script = try ScriptStore.load(id: id, version: version)
             viewModel.dismissAll()
             viewModel.takeInProgress = true
-            try await stage.open(url: script.url, viewport: script.viewportSize, forTake: true)
-            result.stageAtStart = stage.windowState()
-            stageGuard = guardStage(fitted: result.stageAtStart?.frame) { result.coveredDuringTake = true }
+            // Set the scene: the stage for a web script, the arranged windows for an app script.
+            let region: CGRect
+            let shown: [StageRecorder.Shown]
+            var webStage: Stage?
+            if let windows = script.windows, !windows.isEmpty {
+                var targets: [WindowFocus.Target] = []
+                for w in windows { targets.append(try await WindowFocus.resolve(app: w.app, title: w.title)) }
+                let layout = WindowFocus.Layout(rawValue: script.layout ?? "side_by_side") ?? .sideBySide
+                let arranged = try await WindowFocus.arrange(targets, layout: layout)
+                movedWindows = arranged.previous
+                shown = zip(targets, arranged.states).compactMap { t, s in s.frame.map { (t.pid, $0) } }
+                region = shown.map(\.frame).reduce(CGRect.null) { $0.union($1) }
+                result.stageAtStart = arranged.states.first
+            } else {
+                try await stage.open(url: script.url ?? "", viewport: script.viewportSize, forTake: true)
+                webStage = stage
+                shown = [(stage.chromePID, stage.screenRect)]
+                region = stage.screenRect
+                result.stageAtStart = stage.windowState()
+            }
+            stageGuard = guardWindows(shown) { result.coveredDuringTake = true }
 
-            let start = stage.vp(script.viewportSize.width * 0.5, script.viewportSize.height * 0.55)
-            let player = TakePlayer(stage: stage, viewModel: viewModel, start: start)
+            let start = CGPoint(x: region.midX, y: region.minY + region.height * 0.55)
+            let player = TakePlayer(stage: webStage, viewModel: viewModel, start: start, bounds: region)
             player.onScene = { [weak self] i, title in
                 self?.sceneLabel = "Scene \(i + 1)/\(script.scenes.count) · \(title)"
                 self?.onChange?()
@@ -103,7 +122,7 @@ final class TakeController {
                 try FileManager.default.createDirectory(at: Self.recordingsFolder, withIntermediateDirectories: true)
                 let stamp = Self.stampFormatter.string(from: Date())
                 recorder = StageRecorder(url: Self.recordingsFolder.appendingPathComponent("\(id)-v\(version)-\(stamp).mov"))
-                try await recorder?.start(stageRect: stage.screenRect, stagePID: stage.chromePID)
+                try await recorder?.start(region: region, windows: shown)
                 try await Task.sleep(for: .milliseconds(300)) // a beat of stillness before the first move
             }
             startedAt = Date()
@@ -112,8 +131,8 @@ final class TakeController {
             try await player.play(script, through: throughScene)
             if kind == .preview {
                 try await Task.sleep(for: .milliseconds(400)) // let the last bubble and doodle settle
-                let image = try await StageRecorder.snapshot(stageRect: stage.screenRect, stagePID: stage.chromePID)
-                result.snapshot = try Stage.jpeg(NSImage(cgImage: image, size: stage.viewport), width: 960)
+                let image = try await StageRecorder.snapshot(region: region, windows: shown)
+                result.snapshot = try Stage.jpeg(NSImage(cgImage: image, size: region.size), width: 960)
             }
             result.finished = true
             message = kind == .recording ? "take saved" : kind == .preview ? "preview ok" : "rehearsal ok"
@@ -145,6 +164,7 @@ final class TakeController {
         viewModel.dismissAll()
         viewModel.hideGhost()
         viewModel.takeInProgress = false
+        WindowFocus.restore(movedWindows) // an app script's windows go back where they were
 
         lastTake = result
         task = nil
@@ -157,27 +177,29 @@ final class TakeController {
         for waiter in waiting { waiter.resume(returning: result) }
     }
 
-    /// Watch the stage while a take plays. Minimised, closed, moved to another Space, moved or
-    /// resized: stop with a reason (the pointer and recording depend on where it is). Covered: keep
-    /// going (the recording only captures the stage) but note it.
-    private func guardStage(fitted: CGRect?, onCovered: @escaping () -> Void) -> Task<Void, Never> {
+    /// Watch the take's windows while it plays. Minimised, closed, moved to another Space, moved or
+    /// resized: stop with a reason (the pointer and recording depend on where they are). Covered:
+    /// keep going (the recording only captures the take's windows) but note it.
+    private func guardWindows(_ shown: [StageRecorder.Shown], onCovered: @escaping () -> Void) -> Task<Void, Never> {
         Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
                 guard let self, !Task.isCancelled else { return }
-                let state = self.stage.windowState()
-                if state.covered > 0.05 { onCovered() }
-                var reason: (String, String)?
-                if !state.onScreen {
-                    reason = ("stage_lost", "The stage window was minimised, closed or moved to another Space during the take")
-                } else if let f = state.frame, let fitted,
-                          abs(f.minX - fitted.minX) > 4 || abs(f.minY - fitted.minY) > 4 || abs(f.width - fitted.width) > 4 {
-                    reason = ("stage_moved", "The stage window was moved or resized during the take")
-                }
-                if let reason {
-                    self.abortReason = reason
-                    self.task?.cancel()
-                    return
+                for (pid, fitted) in shown {
+                    let state = WindowFocus.state(pid: pid, near: fitted)
+                    if state.covered > 0.05 { onCovered() }
+                    var reason: (String, String)?
+                    if !state.onScreen {
+                        reason = ("stage_lost", "A window in the take was minimised, closed or moved to another Space")
+                    } else if let f = state.frame,
+                              abs(f.minX - fitted.minX) > 4 || abs(f.minY - fitted.minY) > 4 || abs(f.width - fitted.width) > 4 {
+                        reason = ("stage_moved", "A window in the take was moved or resized")
+                    }
+                    if let reason {
+                        self.abortReason = reason
+                        self.task?.cancel()
+                        return
+                    }
                 }
             }
         }

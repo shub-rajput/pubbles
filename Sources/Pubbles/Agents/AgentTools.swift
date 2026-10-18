@@ -50,6 +50,13 @@ final class AgentTools {
         Optional "duration" on point/click/circle/underline/arrow/scroll sets its speed in seconds.
         Targets: a CSS selector or "text:Some words" (innermost visible element containing them).
 
+        App scripts (native apps instead of a web page): give "windows": [{"app", "title"?}, …] and optionally \
+        "layout" (side_by_side, the default; displays; as_is) instead of "url". Steps point at \
+        "element": {"app", "title", "role"?, "window"?, "index"?} (found through Accessibility when the step plays; \
+        inspect_app lists what's there) instead of "target". App scripts can point, say, doodle, pin, clear, hide, \
+        dismiss and wait; scroll, click, type and key are web-only for now. A take arranges the windows (keeping \
+        their sizes), records just them, and puts them back afterwards.
+
         Add "optional": true to a step whose target may not appear (cookie banners); the take skips it if missing.
 
         Placement: the bubble's top-left corner sits about 12px below-right of the pointer, and it grows right and \
@@ -83,7 +90,11 @@ final class AgentTools {
         "required": ["do"],
         "properties": [
             "do": ["type": "string", "enum": ScriptValidator.actions.sorted()],
-            "target": ["type": "string", "description": "CSS selector or \"text:Some words\""],
+            "target": ["type": "string", "description": "web scripts: CSS selector or \"text:Some words\""],
+            "element": ["type": "object", "required": ["app", "title"], "description": "app scripts: an element found through Accessibility",
+                        "properties": ["app": ["type": "string"], "title": ["type": "string", "description": "label it shows, contains"],
+                                       "role": ["type": "string"], "window": ["type": "string"], "index": ["type": "integer"]]],
+            "optional": ["type": "boolean"],
             "anchor": ["type": "string", "enum": ["center", "left", "right", "above", "below"]],
             "offset": ["type": "array", "items": ["type": "number"], "minItems": 2, "maxItems": 2],
             "text": ["type": "string"],
@@ -100,11 +111,15 @@ final class AgentTools {
 
     private static let scriptSchema: [String: Any] = [
         "type": "object",
-        "required": ["name", "url", "scenes"],
+        "required": ["name", "scenes"],
         "properties": [
             "format": ["type": "integer", "enum": [1]],
             "name": ["type": "string", "description": "shown to the user, e.g. \"pubbles.app tour\""],
-            "url": ["type": "string"],
+            "url": ["type": "string", "description": "web script: the page (give url or windows)"],
+            "windows": ["type": "array", "description": "app script: the windows it shows (give url or windows)",
+                        "items": ["type": "object", "required": ["app"],
+                                  "properties": ["app": ["type": "string"], "title": ["type": "string"]]]],
+            "layout": ["type": "string", "enum": ["side_by_side", "displays", "as_is"]],
             "viewport": ["type": "array", "items": ["type": "number"], "minItems": 2, "maxItems": 2,
                          "description": "[width, height] of the page in the video; default [1440, 900]"],
             "scenes": ["type": "array", "items": [
@@ -149,6 +164,9 @@ final class AgentTools {
                       idVersion, required: ["id"]),
             Self.tool("preview_scene", "Play a saved script up to the end of one scene (1-based) and return a snapshot of the stage with Pubbles' bubbles, pins and doodles, to check placement. Same permission as rehearse.",
                       ["id": ["type": "string"], "scene": ["type": "integer"], "version": ["type": "integer"]], required: ["id", "scene"]),
+            Self.tool("inspect_app", "An open app's windows and labelled elements (role, title, frame in screen points), to write \"element\" targets for app scripts or find positions for live mode. Filter with query.",
+                      ["app": ["type": "string"], "window": ["type": "string", "description": "window title contains"],
+                       "query": ["type": "string"], "limit": ["type": "integer"]], required: ["app"]),
             Self.tool("prepare_stage", "Open a fresh stage window for a saved script, in front and centred, and report whether it's visible. Doesn't play anything; use it to let the user look before a take.",
                       idVersion, required: ["id"]),
             Self.tool("stop_take", "Stop the take that's playing."),
@@ -193,6 +211,7 @@ final class AgentTools {
             case "rehearse": return try await runTake(args, kind: .rehearsal)
             case "preview_scene": return try await runTake(args, kind: .preview)
             case "prepare_stage": return try await prepareStage(args)
+            case "inspect_app": return try inspectApp(args)
             case "record": return try await runTake(args, kind: .recording)
             case "live_focus":
                 try requireIdle()
@@ -361,12 +380,38 @@ final class AgentTools {
         return text("ok")
     }
 
+    private func inspectApp(_ args: [String: Any]) throws -> [String: Any] {
+        guard let app = args["app"] as? String else { throw TakeError.script("app is required") }
+        guard let running = AXFinder.runningApp(app) else {
+            throw TakeError.script("\(app) isn't open; live_focus(app) opens it")
+        }
+        let windows = WindowFocus.windows(running.processIdentifier).compactMap { w -> [String: Any]? in
+            var title: CFTypeRef?
+            AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &title)
+            guard let f = WindowFocus.axFrame(w) else { return nil }
+            return ["title": title as? String ?? "", "frame": [Int(f.minX), Int(f.minY), Int(f.width), Int(f.height)]]
+        }
+        let query = (args["query"] as? String)?.lowercased()
+        let limit = args["limit"] as? Int ?? 200
+        let elements = AXFinder.elements(app: app, window: args["window"] as? String)
+            .filter { query == nil || $0.label.lowercased().contains(query!) || $0.role.lowercased().contains(query!) }
+            .prefix(limit)
+            .map { e -> [String: Any] in
+                ["role": e.role, "title": String(e.label.prefix(80)), "window": e.window,
+                 "frame": [Int(e.frame.minX), Int(e.frame.minY), Int(e.frame.width), Int(e.frame.height)]]
+            }
+        return text(json(["app": running.localizedName ?? app, "windows": windows, "elements": Array(elements)]))
+    }
+
     private func prepareStage(_ args: [String: Any]) async throws -> [String: Any] {
         try requireIdle()
         let (id, version) = try scriptRef(args)
         let script = try ScriptStore.load(id: id, version: version)
+        guard let url = script.url, !script.isAppScript else {
+            throw TakeError.script("prepare_stage is for web scripts; an app script arranges its windows when the take starts (live_focus with the same windows shows the layout)")
+        }
         live.end()
-        try await stage.open(url: script.url, viewport: script.viewportSize, forTake: true)
+        try await stage.open(url: url, viewport: script.viewportSize, forTake: true)
         let state = stage.windowState().report
         return text(json(["script": "\(id) v\(version)", "stage": state,
                           "note": "The stage is open in front. Ask the user if they can see it before a take."]))

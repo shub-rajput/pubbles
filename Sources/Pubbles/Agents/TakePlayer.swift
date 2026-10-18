@@ -1,11 +1,12 @@
 import AppKit
 
-/// Plays a script on the stage with the ghost pointer: Pubbles draws the pointer, bubbles and
-/// doodles itself, and the page gets hover, clicks, wheel and keys over DevTools. The user's real
-/// mouse and keyboard are never touched. Cancelling the task stops the take at the next frame.
+/// Plays a script with the ghost pointer: Pubbles draws the pointer, bubbles and doodles itself.
+/// Web scripts play on the stage, whose page gets hover, clicks, wheel and keys over DevTools; app
+/// scripts point at elements in native apps, found through Accessibility. The user's real mouse and
+/// keyboard are never touched. Cancelling the task stops the take at the next frame.
 @MainActor
 final class TakePlayer {
-    let stage: Stage
+    let stage: Stage?
     let viewModel: SubtitleViewModel
     /// Called when a scene starts (index, title).
     var onScene: ((Int, String) -> Void)?
@@ -15,12 +16,19 @@ final class TakePlayer {
     private var scrollSign = 1.0
     private var scrollCalibrated = false
 
-    init(stage: Stage, viewModel: SubtitleViewModel, start: CGPoint) {
+    /// The pointer stays inside `bounds` (the stage, or the arranged windows).
+    init(stage: Stage?, viewModel: SubtitleViewModel, start: CGPoint, bounds: CGRect) {
         self.stage = stage
         self.viewModel = viewModel
-        // The pointer stays inside the stage window, and the page feels it hover.
-        motion = GhostMotion(viewModel: viewModel, start: start, bounds: stage.screenRect)
-        motion.onHover = { p in Task { try? await stage.mouse("mouseMoved", at: p) } }
+        motion = GhostMotion(viewModel: viewModel, start: start, bounds: bounds)
+        if let stage {
+            motion.onHover = { p in Task { try? await stage.mouse("mouseMoved", at: p) } } // the page feels it hover
+        }
+    }
+
+    private func requireStage(_ step: TakeScript.Step) throws -> Stage {
+        guard let stage else { throw TakeError.script("\(step.action) only works on web pages for now") }
+        return stage
     }
 
     /// Play the script, or only through scene `lastScene` (1-based) for a preview.
@@ -105,15 +113,16 @@ final class TakePlayer {
         case "click":
             try await motion.glide(to: try await point(step), duration: step.duration)
             try await sleep(0.08)
-            try await stage.click(at: pos)
+            try await requireStage(step).click(at: pos)
             try await sleep(0.1)
 
         case "type":
             guard let text = step.text else { throw TakeError.script("type needs text") }
-            try await motion.typeRhythm(text) { try await self.stage.typeChar($0) }
+            let stage = try requireStage(step)
+            try await motion.typeRhythm(text) { try await stage.typeChar($0) }
 
         case "key":
-            try await stage.key(step.key ?? "")
+            try await requireStage(step).key(step.key ?? "")
             try await sleep(0.12)
 
         case "wait":
@@ -143,8 +152,14 @@ final class TakePlayer {
     // MARK: Targets
 
     private func rect(_ step: TakeScript.Step) async throws -> CGRect {
+        if let e = step.element {
+            guard let found = AXFinder.find(app: e.app, title: e.title, role: e.role, window: e.window, index: e.index ?? 0) else {
+                throw TakeError.target("\"\(e.title)\" in \(e.app)")
+            }
+            return found.frame
+        }
         guard let t = step.target else { throw TakeError.script("\(step.action) needs a target") }
-        return try await stage.rect(t)
+        return try await requireStage(step).rect(t)
     }
 
     private func point(_ step: TakeScript.Step, defaultAnchor: String = "center") async throws -> CGPoint {
@@ -154,6 +169,7 @@ final class TakePlayer {
     // MARK: Scrolling
 
     private func scroll(to target: String, align: Double, duration: Double?) async throws {
+        guard let stage else { throw TakeError.script("scroll only works on web pages for now") }
         guard let r = try await stage.viewportRect(target) else { throw TakeError.target(target) }
         let y = try await stage.scrollY()
         let desired = min(max(0, y + Double(r.minY) - align * Double(stage.viewport.height)), try await stage.maxScrollY())
@@ -164,6 +180,7 @@ final class TakePlayer {
     /// corrects for any shortfall.
     private func scroll(by pixels: Double, duration: Double?) async throws {
         guard abs(pixels) > 2 else { return }
+        guard let stage else { throw TakeError.script("scroll only works on web pages for now") }
         if !stage.screenRect.insetBy(dx: 40, dy: 40).contains(pos) {
             try await motion.glide(to: stage.vp(stage.viewport.width * 0.7, stage.viewport.height * 0.5))
         }
@@ -198,7 +215,7 @@ final class TakePlayer {
             let want = (pixels * GhostMotion.easeInOutCubic(u)).rounded()
             let delta = (want - sent) * self.scrollSign
             sent = want
-            if delta != 0 { try await self.stage.mouse("mouseWheel", at: self.pos, deltaY: delta) }
+            if delta != 0 { try await self.stage?.mouse("mouseWheel", at: self.pos, deltaY: delta) }
             return u < 1
         }
     }
