@@ -45,38 +45,140 @@ enum WindowFocus {
         }
     }
 
-    /// Bring an app (by name or bundle id, launching it if needed) and one of its windows (title
-    /// contains `title`, else its main window) to the front, and verify it's visible.
-    static func focus(app query: String, title: String?) async throws -> State {
+    /// An app's window, found by app name or bundle id (launched if needed) and title.
+    struct Target {
+        let pid: pid_t
+        let name: String
+        let window: AXUIElement
+        var frame: CGRect? { WindowFocus.axFrame(window) }
+    }
+
+    /// Find an app (by name or bundle id, launching it if needed) and one of its windows (title
+    /// contains `title`, else its main window).
+    static func resolve(app query: String, title: String?) async throws -> Target {
         let app = try await runningApp(query)
         let pid = app.processIdentifier
         let name = app.localizedName ?? query
-        var window: AXUIElement?
         let deadline = Date().addingTimeInterval(8) // a just-launched app may take a moment to open a window
-        while window == nil {
-            window = pickWindow(pid: pid, title: title)
-            if window == nil {
-                if Date() > deadline {
-                    throw TakeError.stage(code: "target_not_ready", message:
-                        title.map { "\(name) has no window titled like \"\($0)\"" } ?? "\(name) has no open window")
-                }
-                try await Task.sleep(for: .milliseconds(250))
+        while true {
+            if let window = pickWindow(pid: pid, title: title) { return Target(pid: pid, name: name, window: window) }
+            if Date() > deadline {
+                throw TakeError.stage(code: "target_not_ready", message:
+                    title.map { "\(name) has no window titled like \"\($0)\"" } ?? "\(name) has no open window")
             }
+            try await Task.sleep(for: .milliseconds(250))
         }
-        let frame = window.flatMap(axFrame)
+    }
+
+    /// Bring an app's window to the front and verify it's visible.
+    static func focus(app query: String, title: String?) async throws -> State {
+        let target = try await resolve(app: query, title: title)
         for attempt in 0..<4 {
-            raise(pid: pid, window: window)
+            raise(pid: target.pid, window: target.window)
             try await Task.sleep(for: .milliseconds(200 + attempt * 150))
-            let s = state(pid: pid, near: frame)
+            let s = state(pid: target.pid, near: target.frame)
             if s.visible { return s }
         }
-        let s = state(pid: pid, near: frame)
-        if !s.onScreen {
-            throw TakeError.stage(code: "target_not_visible", message:
-                "\(name)'s window isn't on screen (minimised, on another Space, or the screen is locked)")
+        throw problem(target, state(pid: target.pid, near: target.frame))
+    }
+
+    enum Layout: String {
+        case sideBySide = "side_by_side" // next to each other at their own sizes, centred as a group
+        case displays                    // one window per display, centred at its own size
+        case asIs = "as_is"              // don't move anything, just bring them forward
+    }
+
+    /// Bring several windows forward together, laid out so all of them can be seen. Returns each
+    /// one's state (in the given order) and where each window was before, to put them back later.
+    static func arrange(_ targets: [Target], layout: Layout) async throws -> (states: [State], previous: [(AXUIElement, CGRect)]) {
+        let previous = targets.compactMap { t in t.frame.map { (t.window, $0) } }
+        let frames = layoutFrames(targets.map(\.frame), layout: layout)
+        for (target, frame) in zip(targets, frames) {
+            AXUIElementSetAttributeValue(target.window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            if let frame { setFrame(target.window, frame) }
         }
-        throw TakeError.stage(code: "target_occluded", message:
-            "Another window still covers \(Int((s.covered * 100).rounded()))% of \(name)'s window")
+        var states: [State] = []
+        for attempt in 0..<4 {
+            // Raise in reverse, so with as_is the first window ends up on top.
+            for target in targets.reversed() { raise(pid: target.pid, window: target.window) }
+            try await Task.sleep(for: .milliseconds(250 + attempt * 150))
+            states = targets.map { state(pid: $0.pid, near: $0.frame) }
+            if layout == .asIs || states.allSatisfy(\.visible) { break }
+        }
+        if layout != .asIs, let i = states.firstIndex(where: { !$0.visible }) {
+            throw problem(targets[i], states[i])
+        }
+        return (states, previous)
+    }
+
+    /// Put windows back where they were.
+    static func restore(_ previous: [(AXUIElement, CGRect)]) {
+        for (window, frame) in previous { setFrame(window, frame) }
+    }
+
+    private static func problem(_ target: Target, _ s: State) -> TakeError {
+        if !s.onScreen {
+            return .stage(code: "target_not_visible", message:
+                "\(target.name)'s window isn't on screen (minimised, on another Space, or the screen is locked)")
+        }
+        return .stage(code: "target_occluded", message:
+            "Another window still covers \(Int((s.covered * 100).rounded()))% of \(target.name)'s window")
+    }
+
+    /// New frames in global CoreGraphics coordinates (top-left origin), within the display's free
+    /// area (no menu bar or Dock). Windows keep their own sizes and only shrink if they don't fit.
+    /// nil = leave that window where it is.
+    private static func layoutFrames(_ current: [CGRect?], layout: Layout) -> [CGRect?] {
+        guard layout != .asIs, let primary = NSScreen.screens.first else { return current.map { _ in nil } }
+        func freeArea(_ screen: NSScreen) -> CGRect {
+            let v = screen.visibleFrame
+            return CGRect(x: v.minX, y: primary.frame.height - v.maxY, width: v.width, height: v.height).insetBy(dx: 10, dy: 10)
+        }
+        func screen(containing frame: CGRect?) -> NSScreen {
+            let center = frame.map { CGPoint(x: $0.midX, y: $0.midY) }
+            return NSScreen.screens.first { s in center.map { freeArea(s).insetBy(dx: -10, dy: -10).contains($0) } ?? false }
+                ?? NSScreen.main ?? primary
+        }
+        let sizes = current.map { $0?.size ?? CGSize(width: 900, height: 700) }
+
+        if layout == .displays {
+            let screens = NSScreen.screens
+            return sizes.enumerated().map { i, size in
+                let area = freeArea(screens[min(i, screens.count - 1)])
+                let w = min(size.width, area.width), h = min(size.height, area.height)
+                return CGRect(x: area.midX - w / 2, y: area.midY - h / 2, width: w, height: h)
+            }
+        }
+
+        // Side by side on the display the first window is on.
+        let area = freeArea(screen(containing: current.first ?? nil))
+        let gap: CGFloat = 16
+        let available = area.width - gap * CGFloat(sizes.count - 1)
+        var widths = sizes.map(\.width)
+        if widths.reduce(0, +) > available {
+            // Shrink only the windows wider than an equal share, just enough to fit.
+            let share = available / CGFloat(widths.count)
+            let narrow = widths.filter { $0 <= share }.reduce(0, +)
+            let wideCount = CGFloat(widths.filter { $0 > share }.count)
+            let wideWidth = (available - narrow) / max(1, wideCount)
+            widths = widths.map { $0 > share ? wideWidth : $0 }
+        }
+        var x = area.midX - (widths.reduce(0, +) + gap * CGFloat(widths.count - 1)) / 2
+        return zip(widths, sizes).map { w, size in
+            let h = min(size.height, area.height)
+            defer { x += w + gap }
+            return CGRect(x: x, y: area.midY - h / 2, width: w, height: h)
+        }
+    }
+
+    private static func setFrame(_ window: AXUIElement, _ frame: CGRect) {
+        var origin = frame.origin, size = frame.size
+        if let position = AXValueCreate(.cgPoint, &origin) {
+            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
+        }
+        if let value = AXValueCreate(.cgSize, &size) {
+            AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
+        }
     }
 
     // MARK: Checking
@@ -177,7 +279,7 @@ enum WindowFocus {
         return AXUIElementCopyAttributeValue(e, name as CFString, &v) == .success ? v as? String : nil
     }
 
-    private static func axFrame(_ e: AXUIElement) -> CGRect? {
+    nonisolated static func axFrame(_ e: AXUIElement) -> CGRect? {
         var p: CFTypeRef?, s: CFTypeRef?
         guard AXUIElementCopyAttributeValue(e, kAXPositionAttribute as CFString, &p) == .success,
               AXUIElementCopyAttributeValue(e, kAXSizeAttribute as CFString, &s) == .success,

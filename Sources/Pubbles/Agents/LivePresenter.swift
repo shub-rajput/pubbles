@@ -13,6 +13,8 @@ final class LivePresenter {
     private var motion: GhostMotion?
     private var last: Task<Void, Error>?
     private var idleTimer: Timer?
+    /// Where arranged windows were before, so live_end can put them back.
+    private var movedWindows: [(AXUIElement, CGRect)] = []
     private static let idleTimeout: TimeInterval = 60
 
     var isActive: Bool { motion != nil }
@@ -22,6 +24,23 @@ final class LivePresenter {
     }
 
     // MARK: Actions
+
+    /// Bring several apps' windows forward together, laid out so all can be seen (for explaining
+    /// something that spans apps). They go back where they were when live mode ends.
+    func arrange(_ windows: [(app: String, title: String?)], layout: WindowFocus.Layout) async throws -> [(String, WindowFocus.State)] {
+        var result: [(String, WindowFocus.State)] = []
+        try await serial { _ in
+            var targets: [WindowFocus.Target] = []
+            for w in windows { targets.append(try await WindowFocus.resolve(app: w.app, title: w.title)) }
+            let (states, previous) = try await WindowFocus.arrange(targets, layout: layout)
+            // Keep the earliest known position of each window across repeated arranges.
+            for (window, frame) in previous where !self.movedWindows.contains(where: { CFEqual($0.0, window) }) {
+                self.movedWindows.append((window, frame))
+            }
+            result = zip(targets.map(\.name), states).map { ($0, $1) }
+        }
+        return result
+    }
 
     /// Bring the app (and window) the agent is explaining to the front, so the user sees what the
     /// pointer is pointing at. Returns where that window is and whether it's visible.
@@ -88,6 +107,8 @@ final class LivePresenter {
         last = nil
         idleTimer?.invalidate()
         idleTimer = nil
+        WindowFocus.restore(movedWindows)
+        movedWindows = []
         guard motion != nil else { return }
         motion = nil
         viewModel.dismissAll()

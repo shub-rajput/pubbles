@@ -62,7 +62,9 @@ final class AgentTools {
 
         Live mode (any app, nothing recorded): to point at and explain things anywhere on screen while you \
         work with the user. Start with live_focus(app, title?) so the window you're talking about is in front \
-        (it returns that window's frame); or pass app on any live action. Then live_point, live_say, \
+        (it returns that window's frame); or pass app on any live action. If the explanation spans apps, \
+        live_focus(windows: [{app}, {app}]) shows them side by side (positions change, so use the frames it \
+        returns); they go back where they were on live_end. Then live_point, live_say, \
         live_circle, live_underline, live_arrow, live_pin, live_clear, live_hide_bubble, and live_end when done. Positions are screen points from the top-left \
         of the main display (the space macOS Accessibility frames use), so find them with a computer-use or \
         accessibility tool first. The pointer starts where the user's mouse is; give the user time to read \
@@ -150,8 +152,12 @@ final class AgentTools {
             Self.tool("prepare_stage", "Open a fresh stage window for a saved script, in front and centred, and report whether it's visible. Doesn't play anything; use it to let the user look before a take.",
                       idVersion, required: ["id"]),
             Self.tool("stop_take", "Stop the take that's playing."),
-            Self.tool("live_focus", "Live mode: bring an app's window to the front (launching the app if needed) and check it's visible, so the user sees what you point at. Returns the window's frame in screen points.",
-                      target, required: ["app"]),
+            Self.tool("live_focus", "Live mode: bring an app's window to the front (launching the app if needed) and check it's visible, so the user sees what you point at. Returns the window's frame in screen points. For something that spans apps, pass windows: [{app, title?}, …] instead; they're laid out side by side (or one per display, or as they are) so all are visible, and moved back when live mode ends.",
+                      target.merging([
+                          "windows": ["type": "array", "items": ["type": "object", "required": ["app"], "properties": [
+                              "app": ["type": "string"], "title": ["type": "string"]]]],
+                          "layout": ["type": "string", "enum": ["side_by_side", "displays", "as_is"], "description": "for windows; default side_by_side"],
+                      ]) { a, _ in a }),
             Self.tool("live_point", "Live mode: glide Pubbles' pointer to a screen position (points, top-left of the main display).",
                       live(["x": num, "y": num, "duration": num]), required: ["x", "y"]),
             Self.tool("live_say", "Live mode: show a new message in the bubble at the pointer (replaces the previous one). Optionally glide to x, y first. \"\\n\" starts a new line; lines up to \(charLimit) characters.",
@@ -189,8 +195,20 @@ final class AgentTools {
             case "prepare_stage": return try await prepareStage(args)
             case "record": return try await runTake(args, kind: .recording)
             case "live_focus":
-                guard let app = args["app"] as? String else { throw TakeError.script("app is required") }
                 try requireIdle()
+                if let list = args["windows"] as? [[String: Any]], !list.isEmpty {
+                    let windows = try list.map { w -> (app: String, title: String?) in
+                        guard let app = w["app"] as? String else { throw TakeError.script("each window needs an app") }
+                        return (app, w["title"] as? String)
+                    }
+                    let raw = args["layout"] as? String ?? "side_by_side"
+                    guard let layout = WindowFocus.Layout(rawValue: raw) else {
+                        throw TakeError.script("layout is side_by_side, displays or as_is")
+                    }
+                    let states = try await live.arrange(windows, layout: layout)
+                    return text(json(states.map { name, state in state.report.merging(["app": name]) { a, _ in a } }))
+                }
+                guard let app = args["app"] as? String else { throw TakeError.script("pass app, or windows for several") }
                 return text(json(try await live.focus(app: app, title: args["title"] as? String).report))
             case "live_point", "live_say", "live_circle", "live_underline", "live_arrow",
                  "live_pin", "live_clear", "live_hide_bubble":
